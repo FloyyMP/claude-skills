@@ -1,3 +1,5 @@
 # Tool caches written alongside skills, not part of the skill source
 .impeccable/
 *.cache.json
+# skill-creator eval scratch (regenerable test output)
+*-workspace/
