@@ -45,13 +45,17 @@ has their own; consistency across prompts matters more than the exact word chose
 
 ## System prompt vs. user message
 
-When the prompt is for an API integration or an agent with a fixed persona, split it:
+When the prompt is for an API integration or an agent with a fixed persona, the content divides
+into two parts, but they still ship in one fenced code block (see the Deliver step in SKILL.md:
+two blocks break `/copy`). Separate them with a plain marker line inside the block, e.g.
+`===== SYSTEM PROMPT =====` and `===== USER MESSAGE =====`:
 
-- **System prompt**: `<role>`, stable `<context>`, `<constraints>`, `<output_format>`, and the
-  `<examples>`. Everything that is true for every call. For a character or persona, the docs
+- **System prompt part**: `<role>`, stable `<context>`, `<constraints>`, `<output_format>`, and
+  the `<examples>`. Everything that is true for every call. For a character or persona, the docs
   recommend also listing common scenarios with the expected response to each.
-- **User message**: the run-time input tags and the final task line.
+- **User message part**: the run-time input tags and the final task line.
 
-For a one-off chat prompt, keep everything in one block; the split only pays off when the same
-prompt is reused with different inputs. Long stable content in the system prompt is also what
-prompt caching works on, so the split saves money on repeated calls.
+The note under the block tells the reader which half goes in the API's `system` field and which
+is the per-call message. For a one-off chat prompt, there is no division: everything is one
+block with no markers. The split matters because long stable content in the system field is
+what prompt caching works on, so it saves money on repeated calls.

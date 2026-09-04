@@ -91,13 +91,31 @@ sentence in the prompt should either change the model's behaviour or be cut.
    - Self-check: "Before you finish, verify your answer against [criteria]" helps on coding and
      maths tasks. Leave it out of prompts aimed at Opus 5, which over-verifies when told to.
 
-5. **Deliver.** Put the finished prompt in one fenced code block. Under it, at most three
-   short lines: placeholders to fill in, one assumption you made if it matters, nothing else.
-   No prompt-engineering theory, no walkthrough of the sections.
+5. **Deliver.** Put the finished prompt in exactly one fenced code block, and never more than
+   one. The user copies it with `/copy`, which lists every fenced block as a separate,
+   unlabelled option; a prompt split across two blocks becomes two confusing "empty" choices
+   and cannot be grabbed in a single selection. One block means one clean copy of the whole
+   prompt. Under the block, at most three short lines: placeholders to fill in, one assumption
+   you made if it matters, nothing else. No prompt-engineering theory, no walkthrough of the
+   sections, and nothing else fenced anywhere in the reply, so the block is the only copy
+   option besides the full response.
 
-   If the prompt is for an API integration or an agent with a fixed persona, split it into two
-   blocks labelled **System prompt** (role, stable context, constraints, format, examples) and
-   **User message** (run-time inputs and the final task line). Otherwise one block.
+   If the prompt is for an API integration or an agent with a fixed persona, it still goes in
+   one block. Mark the two parts with plain comment lines inside that single block so they copy
+   together:
+
+   ```
+   ===== SYSTEM PROMPT =====
+   <role>...</role>
+   <constraints>...</constraints>
+
+   ===== USER MESSAGE =====
+   <input>{{RUN_TIME_INPUT}}</input>
+   ...the final task line
+   ```
+
+   The reader splits them into the two API fields themselves; the note under the block says
+   which half is which.
 
 ## Existing prompts
 
