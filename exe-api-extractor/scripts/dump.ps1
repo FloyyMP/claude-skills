@@ -20,7 +20,7 @@ $mach  = [System.BitConverter]::ToUInt16($bytes, $peOff + 4)
 $arch  = switch ($mach) { 0x14c {"x86"} 0x8664 {"x64"} default {"0x$("{0:X4}" -f $mach)"} }
 $sizeMB = [Math]::Round($bytes.Length / 1MB, 2)
 
-Write-Host "=BINARY_INFO arch=$arch size=${sizeMB}MB path=$ExePath"
+Write-Output "=BINARY_INFO arch=$arch size=${sizeMB}MB path=$ExePath"
 
 # PyInstaller detection
 $pyiFound = $false
@@ -30,7 +30,7 @@ for ($i = $scanStart; $i -lt $bytes.Length - 2; $i++) {
         $pyiFound = $true; break
     }
 }
-if ($pyiFound) { Write-Host "=RUNTIME PyInstaller" }
+if ($pyiFound) { Write-Output "=RUNTIME PyInstaller" }
 
 # Extract ASCII strings >= MinLen
 $cur = New-Object System.Text.StringBuilder
@@ -38,8 +38,8 @@ for ($i = 0; $i -lt $bytes.Length; $i++) {
     $b = $bytes[$i]
     if ($b -ge 32 -and $b -le 126) { [void]$cur.Append([char]$b) }
     else {
-        if ($cur.Length -ge $MinLen) { Write-Host $cur.ToString() }
+        if ($cur.Length -ge $MinLen) { Write-Output $cur.ToString() }
         [void]$cur.Clear()
     }
 }
-if ($cur.Length -ge $MinLen) { Write-Host $cur.ToString() }
+if ($cur.Length -ge $MinLen) { Write-Output $cur.ToString() }

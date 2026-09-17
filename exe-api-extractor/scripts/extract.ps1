@@ -64,19 +64,8 @@ if ($runtime -eq "Unknown" -and ($strings | Where-Object { $_ -match '\belectron
 # Noise filter: standard library / framework internals to ignore
 $noise = 'crypto/|tls:|x509:|http2:|runtime\.|reflect\.|encoding/|asn1:|ecdsa:|chacha|GCM|FIPS|golang\.org|go\.dev|hkdf|hmac|ed25519|ml-dsa|mlkem|sync\.|math/|strconv|bufio|compress|context|errors|unicode|atomic|vendor/'
 
-# ---- DEVELOPER / SOURCE PATHS ----
-
-# Module cache paths reveal developer username and third-party deps
-$srcPaths = $strings | Where-Object {
-    $_ -match '\.(go|py|rs|cs|js|ts)$' -and $_ -match 'Users/[^/]+/(go/pkg/mod|\.cargo|AppData)'
-} | Sort-Object -Unique
-
-$devUser = $null
-foreach ($p in $srcPaths) {
-    if ($p -match 'Users/([^/]+)/') { $devUser = $Matches[1]; break }
-}
-
-# Project-internal source files: short relative paths, NOT stdlib/system paths
+# ---- PROJECT SOURCE FILES ----
+# Short relative paths that belong to the project (not stdlib/vendor)
 $projFiles = $strings | Where-Object {
     $_ -match '\.(go|py|rs|cs)$' -and
     $_ -notmatch '(C:/Program Files|C:/Windows|/usr/lib|/usr/local|pkg/mod/|C:/Users/)' -and
@@ -85,11 +74,11 @@ $projFiles = $strings | Where-Object {
 
 # ---- API ENDPOINTS (URLs) ----
 # Extract URLs from within all strings (URLs often live inside large concatenated blobs)
-$urlNoise = 'golang\.org|go\.dev|w3\.org|jquery|bootstrap|schema\.org|openssl\.org|pkg/crypto|about:|example\.com|mozilla\.org|whatwg\.org|iana\.org|http://www\.w3'
+$urlNoise = 'golang\.org|go\.dev|w3\.org|jquery|bootstrap|schema\.org|openssl\.org|pkg/crypto|about:|example\.com|mozilla\.org|whatwg\.org|iana\.org|http://www\.w3|bogdanfinn.*wiki'
 $urls = $strings | ForEach-Object {
     [regex]::Matches($_, 'https?://[a-zA-Z0-9][a-zA-Z0-9._-]+\.[a-zA-Z]{2,}[^\s"<>(){},\|\\^`\[\]]*')
 } | ForEach-Object {
-    $url = $_.Value.TrimEnd('.,;)/')
+    $url = $_.Value.TrimEnd('.,;)/:')  # trailing colons appear from "url: error..." concatenation
     # Rule 1: trim CamelCase run-on glued to end of path (e.g. /me + MapIter.Value → /me)
     #   Match: preceded by lowercase/digit, lookahead is UpperCase+2lower+Uppercase (CamelCase word)
     $url = [regex]::Replace($url, '(?<=[a-z0-9])(?=[A-Z][a-z]{2,}[A-Z])[A-Za-z.]+$', '')
@@ -100,6 +89,10 @@ $urls = $strings | ForEach-Object {
     #   e.g. /tokenbytes (after rule 2 removed .Buffer.WriteTo) → /token
     $stdPkgs = 'bytes|strings|errors|strconv|runtime|unicode|unsafe|atomic|io|os|fmt|sync|net|log|math|sort|rand|flag|path|exec|heap|ring|list|big|bits|utf8|utf16|tls|http|gzip'
     $url = [regex]::Replace($url, "(?<=[a-zA-Z0-9_-])($stdPkgs)$", '')
+    # Rule 4: strip known Go stdlib type names glued directly to the last path word
+    #   e.g. /SignInScanState → /SignIn (ScanState is a Go type, not a path segment)
+    $goTypes = 'ScanState|MapIter|WriteTo|ReadFrom|RoundTripper|ResponseWriter|WaitGroup|ReadWriter|ReadCloser|WriteCloser|ReadWriteCloser|FlushError|Flusher|CloseNotifier|Hijacker'
+    $url = [regex]::Replace($url, "($goTypes)[^/]*$", '')
     $url = $url.TrimEnd("/.,;:'")
     # Filter: skip URLs whose hostname has fewer than 3 parts (e.g. http://www.css)
     $hostname = ($url -replace '^https?://([^/]+).*', '$1') -replace ':\d+$', ''
@@ -140,19 +133,12 @@ $customHeaders = $strings | Where-Object {
     $_ -match '^x-[a-z][a-z0-9-]{3,}:' -and $_.Length -lt 80
 } | Sort-Object -Unique
 
-# ---- OUTPUT / STATUS FORMAT STRINGS ----
-$statusFmts = $strings | Where-Object {
-    $_ -match '%(d|s|f|\.?\d+[dsf])' -and $_.Length -lt 80 -and
-    $_ -match '(HIT|BAD|MISS|FREE|LOCK|DENY|RETRY|CHECK|FAIL|VALID|INVALID|CPM|PROXY|COMBO|CHECKED|HITS|FOUND|PREMIUM|SUCCESS|BANNED|GOOD|INVALID|ERROR|WARN|Total|Count)' -and
-    $_ -notmatch $noise
-} | Sort-Object -Unique
-
 # ---- GO SYMBOL TABLE ----
 $mainFuncs = @()
 $pkgFuncs  = @()
 if ($runtime -eq "Go") {
     # Exclude all Go standard library packages and well-known imported packages
-    $stdlibPkgs = 'reflect\.|runtime\.|encoding/|net/|crypto/|tls\.|sync\.|math/|time\.|fmt\.|os\.|io/|bufio\.|sort\.|slices\.|iter\.|maps\.|slices\.|cmp\.|builtin\.|strconv\.|bytes\.|strings\.|context\.|errors\.|unicode/|atomic\.|compress/|path\.|vendor/|golang\.org/|internal/|go:|hash/|container/|log/|mime/|debug/|database/|database/|text/|html/|image/|archive/|testing\.|flag\.'
+    $stdlibPkgs = 'reflect\.|runtime[/.]|encoding/|net/|crypto/|tls\.|sync\.|math/|time\.|fmt\.|os[/.]|io/|bufio\.|sort\.|slices\.|iter\.|maps\.|cmp\.|builtin\.|strconv\.|bytes\.|strings\.|context\.|errors\.|unicode/|atomic\.|compress/|path\.|vendor/|golang\.org/|internal/|go:|hash/|container/|log/|mime/|debug/|database/|text/|html/|image/|archive/|testing\.|flag\.'
     $allGoFuncs = $strings | Where-Object {
         $_ -match '^(main\.|[a-z][a-z0-9_-]+/[a-z][a-z0-9_-]+\.)' -and
         $_ -notmatch $stdlibPkgs
@@ -171,8 +157,11 @@ if ($runtime -eq "Go") {
 }
 
 # ---- TLS FINGERPRINT PROFILES (bogdanfinn stack) ----
-$tlsProfiles = $strings | Where-Object { $_ -match 'profiles\.(Chrome|Firefox|Safari|Okhttp|iOS|Android)_' } |
-    ForEach-Object { if ($_ -match 'profiles\.([A-Za-z0-9_]+)') { $Matches[1] } } | Sort-Object -Unique
+# Profiles appear in symbol table as "profiles.ProfileName" (package-qualified)
+$tlsProfiles = $strings | ForEach-Object {
+    [regex]::Matches($_, 'profiles\.([A-Z][A-Za-z0-9_]+)')
+} | ForEach-Object { $_.Groups[1].Value } |
+  Where-Object { $_ -and $_.Length -gt 3 } | Sort-Object -Unique
 
 # ---- BUILD MARKDOWN REPORT ----
 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -192,28 +181,14 @@ $L.Add("| File | ``$([System.IO.Path]::GetFileName($ExePath))`` |")
 $L.Add("| Size | $sizeMB MB |")
 $L.Add("| Architecture | $arch |")
 $L.Add("| Runtime | $runtime |")
-if ($devUser) { $L.Add("| Developer (build machine user) | ``$devUser`` |") }
 $L.Add("")
 
-# Developer info
-if ($srcPaths.Count -gt 0 -or $projFiles.Count -gt 0) {
-    $L.Add("## Developer Info")
+# Project source files (no developer identity or build paths)
+if ($projFiles.Count -gt 0) {
+    $L.Add("## Source Files")
     $L.Add("")
-    if ($projFiles.Count -gt 0) {
-        $L.Add("**Project source files:**")
-        $L.Add("")
-        $projFiles | ForEach-Object { $L.Add("- ``$_``") }
-        $L.Add("")
-    }
-    if ($srcPaths.Count -gt 0) {
-        $L.Add("**Build machine paths (module cache):**")
-        $L.Add("")
-        $L.Add('```')
-        $srcPaths | Select-Object -First 12 | ForEach-Object { $L.Add($_) }
-        if ($srcPaths.Count -gt 12) { $L.Add("... ($($srcPaths.Count - 12) more)") }
-        $L.Add('```')
-        $L.Add("")
-    }
+    $projFiles | ForEach-Object { $L.Add("- ``$_``") }
+    $L.Add("")
 }
 
 # API endpoints
@@ -282,14 +257,6 @@ if ($jsonTags.Count -gt 0) {
     $L.Add("")
 }
 
-# Output format strings
-if ($statusFmts.Count -gt 0) {
-    $L.Add("## TUI / Output Format Strings")
-    $L.Add("")
-    $statusFmts | ForEach-Object { $L.Add("- ``$_``") }
-    $L.Add("")
-}
-
 # Go functions
 if ($mainFuncs.Count -gt 0 -or $pkgFuncs.Count -gt 0) {
     $L.Add("## Go Symbol Table")
@@ -324,6 +291,9 @@ $L.Add("*Generated by exe-api-extractor*")
 $report = $L -join "`n"
 [System.IO.File]::WriteAllText($outPath, $report, [System.Text.Encoding]::UTF8)
 
-Write-Host "Report written to: $outPath"
-Write-Host ""
-Write-Host $report
+$summary = @(
+    "Report: $outPath"
+    "Runtime: $runtime | Arch: $arch | Size: ${sizeMB} MB"
+    "Endpoints: $($urls.Count) | Credentials: $($decodedCreds.Count) | TLS profiles: $($tlsProfiles.Count) | Deps: $($deps.Count)"
+) -join "`n"
+Write-Output $summary
