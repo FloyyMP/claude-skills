@@ -5,3 +5,5 @@
 *-workspace/
 # Packaged skill bundles, rebuilt from the source folder
 *.zip
+# Own git repo
+complete-session/
