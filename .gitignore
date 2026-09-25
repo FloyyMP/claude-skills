@@ -3,3 +3,5 @@
 *.cache.json
 # skill-creator eval scratch (regenerable test output)
 *-workspace/
+# Packaged skill bundles, rebuilt from the source folder
+*.zip

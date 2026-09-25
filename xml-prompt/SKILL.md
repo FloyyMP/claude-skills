@@ -100,6 +100,12 @@ sentence in the prompt should either change the model's behaviour or be cut.
    sections, and nothing else fenced anywhere in the reply, so the block is the only copy
    option besides the full response.
 
+   **Fence delimiter rule:** when the prompt body itself contains triple-backtick code fences
+   (e.g. a directory tree, shell commands, or code samples), the outer fence MUST use four
+   backticks (``````) so the inner triple-backtick fences do not accidentally close it. A
+   triple-backtick outer fence is fine only when the prompt body contains no fenced blocks at
+   all.
+
    If the prompt is for an API integration or an agent with a fixed persona, it still goes in
    one block. Mark the two parts with plain comment lines inside that single block so they copy
    together:
