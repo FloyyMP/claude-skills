@@ -20,9 +20,11 @@ Why: a close-out that reads `No unfinished work. Nothing worth adding. No new le
 
 **Ordering:** every repo-bound write (Step 1 fixes, Step 3 repo config edits) happens **before** Step 5 so it all rides one commit per repo. Memory (Step 6) and the global config live outside any repo and are never committed.
 
-**Modes:** default is **execute**. If the user asked to *preview* / *dry-run*, run every read-only check (Step 0's facts, `prove-clean.ps1`, `run-gates.ps1`, the memory check all stay safe) but make **no writes** — no edits, commits, pushes, stashes, memory saves. Instead of narrating step by step, end with **one consolidated manifest** of what execute *would* do: repos to stage+commit+push (with the branch decision per repo), files to be staged, CLAUDE.md / settings edits with their diffs, memories to add or update. One block the user can approve at a glance, then stop.
+**Modes:** default is **execute**. If the user asked to *preview* / *dry-run*, run every read-only check (Step 0's facts, `prove-clean.sh`, the memory check) but make **no writes** — no edits, commits, pushes, stashes, memory saves. Don't run `run-gates.sh` in preview: test runners write caches, lockfiles and venvs; name the gate command in the manifest instead. Instead of narrating step by step, end with **one consolidated manifest** of what execute *would* do: repos to stage+commit+push (with the branch decision per repo), files to be staged, CLAUDE.md / settings edits with their diffs, memories to add or update. One block the user can approve at a glance, then stop.
 
-**Trigger type:** **Explicit** = `/complete-session` or the user clearly said "complete session" / "wrap up" / "done for today". **Implicit** = a fuzzy signal ("that's it", "we're done"). Implicit can be a false positive, so it gets one confirmation before the first push (5e). Explicit needs no gate. Invoking this skill **is** the user's "commit and push" ask — the standing "don't commit unless I ask" rule is satisfied.
+**Trigger type:** **Explicit** = `/complete-session`, or the user used one of the description's phrases ("complete session", "wrap up", "done for today", "close out"). **Everything else is implicit** ("that's it", "we're done", "call it a day", "heading out") — it can be a false positive, so it gets one confirmation before the first push (5e). Explicit needs no gate. Invoking this skill **is** the user's "commit and push" ask — the standing "don't commit unless I ask" rule is satisfied.
+
+**Precedence:** branch, push and deploy rules in the repo's `CLAUDE.md` / `AGENTS.md` or the global `~/.claude/CLAUDE.md` (a working branch such as `dev`, PR-only, "never push to main", "ask before shipping UI") **override Step 5a/5e**. Follow them and say so in one line. The close-out finishes what the user asked for; it never widens scope.
 
 **Never invoke recursively.** If this skill is already running this turn, exit immediately.
 
@@ -32,15 +34,15 @@ Why: a close-out that reads `No unfinished work. Nothing worth adding. No new le
 
 ### 0a: Pull the facts from the transcript
 
-Run the parser via the **PowerShell tool**. The session id is the UUID in the scratchpad path shown in the system prompt (`…\claude\<slug>\<session-id>\scratchpad`):
+Run the parser via the **Bash tool**. The session id defaults to `$CLAUDE_CODE_SESSION_ID`, which the harness sets for every Bash command:
 
 ```
-& "$HOME\.claude\skills\complete-session\scripts\session-facts.ps1" -SessionId <session-id>
+~/.claude/skills/complete-session/scripts/session-facts.py [--session-id <id>] [--json]
 ```
 
-It reads `~/.claude/projects/<slug>/<session-id>.jsonl` (plus subagent transcripts) and prints: files edited grouped by git repo, repos touched **with a live git-state snapshot** (branch, default, dirty count, ahead count, stashes, worktrees), shell commands that wrote files / changed git state / launched processes, `run_in_background` jobs, subagents (with `isolation`), **worktrees entered** (`EnterWorktree` / `Agent isolation:worktree`), **files handed to the user** (`SendUserFile`), **questions asked** (`AskUserQuestion`), **skills invoked**, schedulers, the last todo list, compaction count **and tokens dropped**, idle time since last activity, and the scratchpad path. **These facts drive Steps 1, 2, 5 and 7** — repos come from *files touched*, never from cwd. If cwd is not a repo but the facts show edits inside one, that repo is in scope.
+It reads `~/.claude/projects/<slug>/<session-id>.jsonl` (plus subagent transcripts) and prints: files edited grouped by git repo, repos touched **with a live git-state snapshot** (branch, default, dirty count, ahead count, stashes, worktrees), shell commands that wrote files / changed git state / launched processes, `run_in_background` jobs, subagents (with `isolation`), **worktrees entered** (`EnterWorktree` / `Agent isolation:worktree`), **files handed to the user** (`SendUserFile`), **questions asked** (`AskUserQuestion`), **skills invoked**, schedulers, the last todo list, compaction count **and tokens dropped**, idle time since last activity, and the session temp dir (`/tmp/claude-<uid>/<slug>/<session-id>`). **These facts drive Steps 1, 2, 5 and 7** — repos come from *files touched*, never from cwd. If cwd is not a repo but the facts show edits inside one, that repo is in scope. Repos changed only through shell commands (`sed -i`, heredoc, `git commit`) are added when dirty or ahead and tagged `<via shell>`; their files aren't in FILES EDITED, so take their paths from `git status` in 0c.
 
-The repo snapshot means Steps 0c, 4, 5 and 7 start from machine truth, not a separate hand-run of `git status`. For the machine parts of Steps 5 and 7, iterate `-Json` output (`ReposTouched`, `RepoState`) rather than eyeballing the human report.
+The repo snapshot means Steps 0c, 4, 5 and 7 start from machine truth, not a separate hand-run of `git status`. For the machine parts of Steps 5 and 7, iterate `--json` output (`ReposTouched`, `RepoState`) rather than eyeballing the human report.
 
 If the script errors, show the error and fall back to conversation recall for this run — and say so in Step 7 (it downgrades "proved" to "recalled").
 
@@ -49,22 +51,25 @@ Note the compaction count. ≥1 means recall of the early session is unreliable:
 ### 0b: Live work the window close would kill
 
 Cross-check the facts against live state:
-- **Background commands** (`run_in_background`) — still running? Wait if about to finish, else ask whether to stop.
-- **Subagents** — `TaskOutput` / `TaskStop`.
-- **Schedulers / watches** — `Monitor`, `/loop` wakeups, `CronList` for cloud agents created this session.
-- **Detached processes** — only if the facts flag any `process` launches (dev servers, `Start-Process`, `&`): check what's still alive since session start:
+- **Background commands / workflows** (`run_in_background`, `Workflow`) — still running? Their output is in the session tmp dir's `tasks/*.output`. Wait if about to finish, else ask whether to stop (`TaskStop`).
+- **Subagents** — `ListAgents` / `TaskStop`.
+- **Schedulers / watches** — `/loop` wakeups, `CronList` for crons created this session, `RemoteTrigger` for cloud routines.
+- **Detached processes** — only if the facts flag any `process` launches (dev servers, `nohup`, `&`, `docker run`): check what's still alive since session start (`Started` is in `--json`):
   ```
-  $t=[datetime]'<Started from 0a>'; Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt $t } 2>$null | Select-Object Name,Id,StartTime
-  Get-NetTCPConnection -State Listen | Select-Object LocalPort,OwningProcess
+  age=$(( $(date +%s) - $(date -d '<Started from 0a>' +%s) ))
+  ps -u "$(id -u)" -o pid,etimes,args --sort=etimes | awk -v a="$age" 'NR==1 || $2 < a'
+  ss -ltnp
   ```
-  (`StartTime` throws AccessDenied on protected processes — the `SilentlyContinue` keeps the list flowing past them.)
-  Report anything the session started that is still listening. Stop it only if it was clearly a throwaway dev server; otherwise ask.
+  (`etimes` = seconds since the process started, so `< age` means started during this session — but so did every other process on the machine in that window: match candidates against the commands the facts list before touching one.)
+  Report anything the session started that is still listening. Stop it only if it was clearly a throwaway dev server; otherwise ask. Never start new processes during the close-out.
 
 **Do not pass Step 0 until every live task is resolved** — a running task can mutate files that Step 5 then commits.
 
 ### 0c: Starting tree snapshot per touched repo
 
-For **each repo in the facts**, run `git -C <repo> status --short` and note what was **already dirty** (paths not in the facts' edited list). This bounds Step 5b and is the rollback reference if a Step 1 autofix clobbers pre-existing edits.
+For **each repo in the facts**, run `git -C <repo> status --short` and note what was **already dirty**: the facts count dirty paths untouched since the session started as the user's own (`PreExistingDirty`). This bounds Step 5b and is the rollback reference if a Step 1 autofix clobbers pre-existing edits.
+
+**The facts under-report shell work.** Most edits go through Bash (heredocs, `sed`, scripts), which the parser can only partly see; a repo you changed through a relative path or a script can be missing entirely. Add every repo the conversation shows you changed, and say it was added from the conversation.
 
 Evidence line: `repos: N (transcript) · files edited: N · bg: N · agents: N · worktrees: N · processes flagged: N · compactions: N (~N tokens dropped)`.
 
@@ -85,35 +90,30 @@ Per item:
 - **Non-repo doc edits** (memory files, `~/.claude/CLAUDE.md`, `.claude/settings.json`) have **no language gate** — they are handled by Steps 3 and 6, not here. Don't try to "verify" them with a build.
 - **Edited but unverified** (source in a repo) — run the **named gate** for that repo, from its root (a build from a subdirectory can silently target the wrong module). The gate runner does the language detection, timeout-bounding and pass/fail rules for you:
   ```
-  & "$HOME\.claude\skills\complete-session\scripts\run-gates.ps1" -Repo <repo-root> [-TimeoutSec 300]
+  ~/.claude/skills/complete-session/scripts/run-gates.sh --repo <repo-root> [--timeout 300]
   ```
-  It matches `go.mod` / `pyproject.toml` / `package.json`, runs the gate below, and exits 0 pass / 1 fail / 2 timed-out-unverified. Fall back to running the steps by hand only when the repo fits none of them:
-  - Python (`pyproject.toml`): `uvx ruff check . && uvx ruff format --check . && uv run pytest` (pytest exit 5 = no tests = skip, not fail).
-  - Go (`go.mod`): `gofmt -l .` (must print nothing), `go vet ./...`, `go test -race ./...`.
-  - Node/TS (`package.json`): the project's own `typecheck` / `lint` / `test` / `build` scripts, whichever exist.
-  - Anything else: the gate the repo's own `CLAUDE.md` names; failing that, the strongest offline check (compile, `py_compile`, a dev-server smoke test for UI).
+  It gates every language it finds (`pyproject.toml` / each `go.mod` / `package.json`) and exits 0 pass / 1 fail / 2 timed-out-unverified / 3 not runnable (no recognized gate, toolchain or deps missing). Read its `RESULT:` line — don't pipe it into `tail` and trust `$?`. **The repo's own gate wins:** if its `CLAUDE.md` / README names a test command or environment (`TZ=UTC`, "we don't use uv", a Makefile target), run that. On exit 3, run the strongest offline check (compile, `py_compile`, `bash -n`, a smoke run) and report it as that — never install toolchains or pull images to make a gate runnable.
   **Every check is timeout-bounded** (the runner enforces it; do the same by hand). A hung test must not stall the close — kill it, report the path as unverified (exit 2), move on. Delete throwaway verification scripts after. Report pass/fail counts.
+  - **A failing gate blocks the push for that repo** — commit locally, list it as open. Exception: a failure that already fails on `HEAD` without your changes (prove it on a clean copy: `d=$(mktemp -d); git archive HEAD | tar -x -C "$d"`, gate there) — report it as pre-existing, don't fix it, don't block on it.
   - **Build outputs:** if the repo has a gitignored build product (`dist/`, `build/`, `*.exe`) and source changed, rebuild it and smoke-test — `git status` never shows a stale binary.
   - **Green tooling is not a working feature.** A typecheck passing says nothing about a UI interaction or a network path you didn't exercise. In Step 7, name what was *machine-checked* and what remains *untested by a human*.
-- **You suggested it, user didn't reply** — silence isn't deferral. Apply now if reversible and low-risk. If destructive or opinionated, ask once, act on the answer **same turn**.
-- **User said "leave it" / "ignore for now" verbatim** — respect it; list as deferred in Step 7. This is the *only* thing that counts as user-deferred.
+- **You suggested or noticed it, user didn't reply** (an offer, an unrelated typo, a bug you pointed out) — **don't apply it**. The user didn't ask for it; list it in Step 7 under "offered, not done" in one line. This covers changes to code, tests, dependencies, the environment (installs, image pulls, servers) and global config (`~/.claude/settings.json`, global `CLAUDE.md`, hooks) — including anything a plugin or hook told you to offer. It does **not** cover the repo-`CLAUDE.md` learnings and memories Steps 3 and 6 exist for: those follow their own test, offered or not.
+- **User deferred it, in any wording** ("leave it", "later", "next week", "don't bother yet") — respect it; list as deferred in Step 7.
 - **Genuinely blocked** (live credentials, a production run, a decision only the user can make) — list as deferred in Step 7, name the blocker.
 
-Default is resolve, not ask. Pause only when the path forward is genuinely ambiguous — "user never replied" does not qualify.
+Default is resolve what the user asked for, not ask. Pause only when the path forward is genuinely ambiguous. If there's a tool to ask (AskUserQuestion), use it; without one (headless), take the non-destructive option — skip, don't push, keep — and list it as open.
 
 **TODO.md sweep:** if the repo has a `TODO.md`, strike through (`~~…~~`) items done this session. Rides Step 5's commit.
 
 ---
 
-## Step 2: Cruft + Scratchpad Sweep
+## Step 2: Cruft + Session Temp Sweep
 
-Evidence line: `untracked in touched repos: N · jobs/tmp files: N · scratchpad files: N`.
+Evidence line: `untracked in touched repos: N · session tmp files: N`.
 
 **Working trees:** for each touched repo, look at untracked files (`git status --short | grep '^??'`). Throwaway scratch **you** created (verification scripts, temp output, `.bak`) — delete. Anything uncertain (user's own files, real output) — ask once, keep or delete, act same turn.
 
-**Bash-tool job temp:** files written by the Bash tool land in `~/.claude/jobs/<id>/tmp`, not the scratchpad and not a repo — the facts list them under `(not in a git repo)`. Glance at that bucket for anything you created this session and left behind (probe scripts, captured output). Harness may GC the jobs dir, but don't rely on it; delete your own throwaways, hand over anything the user wanted.
-
-**Scratchpad:** the session scratchpad dir (path in the facts) is deleted with the session. Glance at it: anything the user asked for (a report, exported data, a generated file) gets moved somewhere durable or handed over via `SendUserFile` — reports go to the user as `.md` files, never as artifacts. Everything else can die with the window; say so in one line. The facts' **files-handed-to-user** list shows what you already sent, so you don't re-hand or miss one.
+**Session temp dir:** the facts print `SESSION TMP` (`/tmp/claude-<uid>/<slug>/<session-id>`, holding `tasks/*.output` from background jobs and anything else the harness wrote). It is not durable. Glance at it — don't delete it (the harness is writing your live command output there): anything the user asked for (a report, exported data, a generated file) gets moved somewhere durable and its path printed, or handed over via `SendUserFile` where that tool exists — reports go to the user as `.md` files, never as artifacts. Throwaway files **you** created elsewhere in `/tmp` (probe scripts, captured output) — delete. Everything else can die with the window; say so in one line. The facts' **files-handed-to-user** list shows what you already sent, so you don't re-hand or miss one.
 
 ---
 
@@ -137,12 +137,12 @@ Evidence line: `candidates: N — kept: N, rejected: N (reasons)`. If the sessio
 
 ### Routing
 - Project gotchas (build commands, layout, local quirks) → the **repo's own `CLAUDE.md`** (rides Step 5's commit). `AGENTS.md`-only repo → edit that file, don't introduce a second convention.
-- Cross-project preferences and behavioral rules → **global `~/.claude/CLAUDE.md`** (never committed; not version-controlled — show the exact diff).
-- **Harness behaviour** ("from now on, when X happens, do Y") is a **hook**, not prose → `.claude/settings.json` via the `update-config` skill. Same for permission allowlists and env vars.
+- Cross-project preferences the user **asked to make a global rule** → **global `~/.claude/CLAUDE.md`**. Every other preference or feedback goes to memory (Step 6) — one home, never both.
+- **Harness behaviour** ("from now on, when X happens, do Y") is a **hook**, not prose → `.claude/settings.json` via the `update-config` skill. Same for permission allowlists and env vars. Only when the user asked for it this session.
 
 ### Flow
 1. Reflect for gotchas; run each through the four-point test.
-2. Read the target file, confirm no overlap, apply survivors directly — no y/n gate (standing user preference). Show the diff.
+2. Read the target file, confirm no overlap. Repo `CLAUDE.md` survivors: apply directly — no y/n gate (standing user preference); the diff rides the commit. Global `CLAUDE.md` / settings: show the exact diff and apply only on a yes — they reach every project and aren't version-controlled. Never `cat` `~/.claude/settings.json` (it can hold tokens): `jq 'del(.env)' ~/.claude/settings.json`.
 3. Don't commit here — the repo edit rides Step 5.
 
 ### Consolidation gate
@@ -170,12 +170,13 @@ Read `git status` and `git log --oneline -5` (commit style). **Unusual states** 
 ```
 git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null   # -> origin/main ; strip "origin/"
 ```
-Fallback: `git remote show origin` → `HEAD branch:`. No remote → the repo's current branch (`git symbolic-ref --short HEAD`).
+Fallback: `<remote>/main` or `<remote>/master` if one exists (the facts' `Default` does this offline). No remote → `init.defaultBranch`, else `main`/`master`. Unknown → say so; don't assume the current branch.
 
 ### 5a: Branch decision
-The user's rule: **a branch is a staging area, never a parking spot.** Work lands on `DEFAULT_BRANCH` before the session ends.
-- On `DEFAULT_BRANCH` with changes → `git switch -c <descriptive-name>` first, commit there, then land (5e). Trivial doc/config-only change: committing straight to default is fine.
-- Already on a feature branch → commit there, then land it — unless the user explicitly said this session to keep the branch separate. If unsure, ask once, act same turn.
+Unless a CLAUDE.md branch rule applies (see **Precedence**), the user's rule: **commit directly on `DEFAULT_BRANCH`, never create a branch.** Work lands on `DEFAULT_BRANCH` before the session ends.
+- On `DEFAULT_BRANCH` with changes → commit there, push (5e).
+- On a branch **this session created** → commit there, then fast-forward it into default, push, delete it (5e).
+- On a branch that **existed before the session** (a feature branch, a long-lived `dev`) → commit and push that branch; landing it on default or deleting it needs the user's yes.
 State the decision in one line.
 
 ### 5b: Stage — bounded scope
@@ -183,27 +184,28 @@ Stage **only the paths this session edited** (from the facts, plus Step 1/3 edit
 
 **Pre-existing-dirty guard:** a file dirty at 0c *and* edited by you bundles the user's earlier hunks. Don't use `git add -p` (interactive, hangs). Surface it — name the file, ask commit-together / skip / user-splits — act same turn.
 
-**CRLF / mode noise (Windows):** if `git diff <path>` shows no substantive change, skip it — phantom-dirty.
+**Mode noise:** if `git diff <path>` shows only a mode change (`old mode 100644 / new mode 100755`) you didn't intend, skip it — phantom-dirty.
 
 ### 5c: Secrets scan
-Run via the **bash tool**:
+Run via the **bash tool**, as **its own command** — read the result before committing; never chain it with `commit`/`push`. From the repo root, added lines only; the scan covers token *formats*, not just key-ish variable names:
 ```
-git diff --cached -- . ':(exclude)*.lock' ':(exclude)*lock.json' ':(exclude)*.sum' \
-  | grep -inE "(api_?key|secret_?key|access_?token|auth_?token|client_?secret|password|passwd|private_?key|BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|bearer [a-z0-9._-]{20,})"
+git -C <repo> diff --cached -U0 -- ':/' ':(exclude)*.lock' ':(exclude)*lock.json' ':(exclude)*.sum' | grep '^+' \
+  | grep -inE "(api_?key|secret|access_?token|auth_?token|client_?secret|password|passwd|private_?key|BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}|bearer [a-z0-9._-]{20,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_\w{20,}|sk-(proj|ant)-[A-Za-z0-9_-]{20,}|[sr]k_live_[A-Za-z0-9]{16,}|xox[abpr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{10,}\.eyJ|://[^/:@ ]+:[^@ ]+@)"
 ```
-Also flag staged `.env` files and filenames containing `cred`, `secret`, `token`, `key`. Hardcoded secrets are fine in **local** tools but must not reach a remote. **Hits + remote exists:** stop, list `file:line — pattern`, ask. **No remote:** note, proceed.
+`gitleaks protect --staged` is better where installed. Also flag staged `.env` files and filenames containing `cred`, `secret`, `token`, `key`. Hardcoded secrets are fine in **local** tools but must not reach a remote. **Hits + remote exists:** stop, list `file:line — pattern` (the file's line, not the diff's), ask. **No remote:** note, proceed.
 
 ### 5d: Commit
-Nothing staged → one line why, go to 5f. Otherwise a concise message in the repo's style; commit. Pre-commit hook fails → report exact error, fix if obvious, never `--no-verify`.
+Nothing staged → one line why, go to 5f. Otherwise a concise message in the repo's style — one commit per repo unless the user prefers small commits; commit. Pre-commit hook fails → report exact error, fix if obvious (never invent an issue number or a ticket the hook demands — ask), never `--no-verify`.
 
 ### 5e: Land on default and push
 **Implicit-trigger gate:** if this skill fired implicitly, pause once before the first push: state what's committed and where it's going; push only on go-ahead. One combined confirmation for all repos.
 
-If committed on a branch:
+If committed on a branch this session created (see 5a):
 ```
 git switch DEFAULT_BRANCH
 git merge --ff-only <branch>
 ```
+Inside a linked worktree (`claude -w`, `EnterWorktree`) `git switch DEFAULT_BRANCH` fails because the main tree has it checked out: verify `git merge-base --is-ancestor origin/DEFAULT_BRANCH HEAD`, then `git push origin HEAD:DEFAULT_BRANCH`, and tell the user the main tree needs `git pull` and the worktree can be removed after exit — you can't remove the worktree you're running in.
 - **ff-only fails** (default moved underneath you) → stop, report, ask: rebase-then-land or hand back. Never merge-commit or force.
 - Success → `git push` default (`-u origin DEFAULT_BRANCH` if no upstream), then `git branch -d <branch>`; if the branch was ever pushed, `git push origin --delete <branch>`.
 
@@ -212,7 +214,7 @@ If committed straight to default → `git push` (`-u` if no upstream).
 **No remote** → landed locally; say "no remote, nothing to push".
 
 ### 5f: Prior unpushed commits
-`git log @{u}.. --oneline 2>/dev/null` (fallback `git log <branch> --not --remotes`). Ahead → push. "No changes this session" + 3 unpushed commits is not clean.
+`git log @{u}.. --oneline 2>/dev/null` (fallback `git log <branch> --not --remotes`). Ahead → secrets-scan the range (`git log -p @{u}.. | grep '^+' | grep -inE …` as in 5c), then push. "No changes this session" + 3 unpushed commits is not clean. Not while a merge/rebase is in progress (edge-cases): hand back instead.
 
 ### 5g: Push failures
 - **Rejected (non-fast-forward)** → remote moved. Report. **Never auto-force.** Offer pull/rebase-then-push or hand back.
@@ -240,7 +242,7 @@ Evidence line: `candidates: N — saved: N, updated: N, rejected: N`.
 
 Persist what this session produced that isn't already in memory: new user preferences/feedback, project decisions or context the user expressed, corrections to stale entries, new external references. **Same bar as Step 3:** durable, non-obvious, not already stored, not something the repo/git already records. Default skew omit.
 
-**Auto-save** without asking. Write directly to `~/.claude/memory/` (exists; don't `mkdir`). One fact per file:
+**Auto-save** without asking. Memory lives in the **auto-memory dir named in the system prompt** — on Linux that's per project: `~/.claude/projects/<slug>/memory/`, flat, one fact per file:
 
 ```markdown
 ---
@@ -254,15 +256,17 @@ metadata:
 Link related memories with [[their-name]].>
 ```
 
-Then one pointer line in `MEMORY.md` — `- [Title](file.md) — hook`. Convert relative dates to absolute. Check for an existing file covering the same ground and update it rather than near-duplicating. Memory is **never committed, never pushed**.
+After writing the file, add one pointer line to that dir's `MEMORY.md`: `- [Title](file.md) — hook`. The file name must match `name:`.
+
+Convert relative dates to absolute. Check for an existing file covering the same ground and update it rather than near-duplicating. Memory is **never committed, never pushed**. An answer the user gave to one close-out question is a decision for this session, not a standing rule — don't save "don't ask again" memories from it.
 
 **Mechanical index check — every session:**
 ```
-& "$HOME\.claude\skills\complete-session\scripts\memory-index-check.ps1" [-Stats]
+~/.claude/skills/complete-session/scripts/memory-index-check.py [--stats] [--memory-dir <dir>]
 ```
-Fix every **finding** (unindexed file, dangling `MEMORY.md` link, indexed-twice, bad frontmatter, name/file mismatch) before moving on — those are structural and fail the exit code. **Dead `[[wikilinks]]`** are reported too but are *informational*: a forward reference to a memory you haven't written yet is allowed by the format, so only fix one that's an actual typo or points at a renamed file. Cheap, and it catches the "claimed to save, never wrote the file" failure.
+It finds the memory dir from the session's git root (the one the system prompt names), and "no memory files yet" passes — never create an empty `MEMORY.md` to satisfy it. Fix every **finding** (unindexed file, dangling `MEMORY.md` link, indexed-twice, bad frontmatter, name/file mismatch) before moving on — those are structural and fail the exit code. **Dead `[[wikilinks]]`** are reported too but are *informational*: a forward reference to a memory you haven't written yet is allowed by the format, so only fix one that's an actual typo or points at a renamed file. Cheap, and it catches the "claimed to save, never wrote the file" failure.
 
-**Deep reconcile — only on signal:** you hit a stale, duplicate or contradictory memory this session, or a memory names a file/flag/path you found no longer exists. Then merge, fix, or delete — **verifying against live state first**. Not every session, and never because of a raw entry count. When a signal does trip, `-Stats` gives the by-type counts and the **orphan list** (memories nothing links to) to focus the reconcile.
+**Deep reconcile — only on signal:** you hit a stale, duplicate or contradictory memory this session, or a memory names a file/flag/path you found no longer exists. Then merge, fix, or delete — **verifying against live state first**. Not every session, and never because of a raw entry count. When a signal does trip, `--stats` gives the by-type counts and the **orphan list** (memories nothing links to) to focus the reconcile.
 
 ---
 
@@ -272,9 +276,9 @@ Not a paragraph — a table, every row backed by a command you ran **now** (not 
 
 **Generate the per-repo rows mechanically** — this is the proof step, so don't hand-run and hand-transcribe six git commands per repo:
 ```
-& "$HOME\.claude\skills\complete-session\scripts\prove-clean.ps1" -Repo <repo1>,<repo2>
+SINCE=$(date -d '<Started from 0a>' +%s) ~/.claude/skills/complete-session/scripts/prove-clean.sh <repo1> <repo2>
 ```
-It emits the working-tree / unpushed / **push-landed (local HEAD == upstream)** / on-default / stashes / worktree / unmerged rows per repo and exits 0 only when every repo is clean. Paste the non-repo rows (gate, background, scratchpad, memory index, config, memory) around it. Open the session with a one-line **summary** from the facts: `<duration> · <N> repos landed · <N> files changed · <N> memories saved · <N> tokens dropped`.
+It emits the working-tree / unpushed / **push-landed (local HEAD == upstream)** / op-in-progress / on-default / stashes / worktree / unmerged rows per repo and exits 0 only when every repo is clean. `SINCE` limits the stash and branch rows to ones created this session — the user's own older stashes and branches are theirs, not open items. Read its `ALL CLEAN` / `OPEN ITEMS` line; don't pipe it. A repo whose documented working branch isn't the default (see **Precedence**) will show `on default branch OPEN` by design — mark that row "working branch per CLAUDE.md", not ✓. Paste the non-repo rows (gate, background, session tmp, memory index, config, memory) around it. Open the session with a one-line **summary** from the facts: `<duration, copied from the facts' span> · <N> repos landed · <N> files changed · <N> memories saved · <N> tokens dropped`.
 
 ```
 CHECK                          COMMAND                                   RESULT
@@ -286,10 +290,10 @@ per repo <path>:
   single worktree              git worktree list                         1 ✓
   no session branches left     git branch --no-merged <default>          (empty) ✓
   verification gate            <gate command>                            pass N / fail 0 ✓  | not run: <why>
-background / agents            TaskOutput · CronList                     none ✓
-processes started by session   Get-Process since <start>                 none ✓ | not checked (none launched)
-scratchpad                     <path>                                    N files, handed over / discarded ✓
-memory index                   memory-index-check.ps1                    0 findings ✓
+background / agents            tasks/*.output · ListAgents · CronList    none ✓
+processes started by session   ps etimes < session age                   none ✓ | not checked (none launched)
+session tmp                    <path>                                    N files, handed over / left to expire ✓
+memory index                   memory-index-check.py                     0 findings ✓
 config changed                 —                                         repo CLAUDE.md / global / settings / none
 memory                         —                                         N added, N updated
 ```
@@ -299,8 +303,9 @@ Then **machine-checked vs untested:** one line each — what the gates covered, 
 End with one of:
 - **Session is clean.** — every row ✓. The normal ending.
 - **Session has open items:** — followed by a numbered list, one per line, each naming the blocker.
-  - **Acceptable blockers:** user said "leave it" verbatim; needs live credentials/production; a decision only the user can make and you already asked; a push rejected / gate-declined / failed on auth — committed locally, say so; staged secrets awaiting a decision; `ff-only` refused because default moved.
-  - **Not acceptable:** "user didn't reply to my suggestion", "noticed something tangential", "didn't have time to verify", or any row you simply didn't run.
+  - **Acceptable blockers:** user deferred it (any wording); needs live credentials/production; a decision only the user can make and you already asked; a push rejected / gate-declined / failed on auth — committed locally, say so; a gate that fails on this session's changes — committed locally, not pushed; staged secrets awaiting a decision; `ff-only` refused because default moved; pre-existing user WIP left uncommitted on purpose.
+  - **Not acceptable:** "didn't have time to verify", or any row you simply didn't run.
+  - Suggestions the user never answered and things you noticed in passing are **not** open items: list them after the ending under "Offered, not done" (one line each), so they neither block "clean" nor get applied.
 
 If Step 0a's script failed and you ran on recall, say so here: the table is then "recalled", not "proved".
 
@@ -312,6 +317,7 @@ If Step 0a's script failed and you ran on recall, say so here: the table is then
 - Never skip pre-commit / pre-push hooks with `--no-verify`.
 - Never merge-commit onto the default branch — `--ff-only`, or stop and ask.
 - Never delete a branch, worktree or stash you didn't create this session without asking.
+- Never change global config (`~/.claude/settings.json`, global `CLAUDE.md`, hooks) without the user's yes, and never print `settings.json` whole.
 - Never hardcode a default branch name — derive it per repo.
 - If any step fails, surface the failure and ask before proceeding — never silently swallow errors.
 - Never invoke this skill recursively.

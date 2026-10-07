@@ -4,11 +4,11 @@ Read this only when Step 5's reads detect one of the states below. Each has a sp
 
 ## Unborn HEAD (fresh `git init`, no commits yet)
 
-`git log`, `@{u}`, and the default-branch derivation all error — that's expected, not a failure. Skip those reads, stage your paths (5b–5c), and make the first commit (5d). There's nothing to push unless a remote + upstream already exist.
+`git log` and `@{u}` error — that's expected, not a failure. Skip those reads, stage your paths (5b–5c), and make the first commit (5d). If a remote is configured, push it with `git push -u <remote> <branch>` (5e); with no remote there's nothing to push.
 
 ## Detached HEAD
 
-If `git symbolic-ref -q HEAD` shows no branch, a commit here gets orphaned on push. Create a branch (`git switch -c <name>`) or surface to the user.
+If `git symbolic-ref -q HEAD` shows no branch, a commit here gets orphaned on push. Don't create a branch (the user never wants one): stop and surface it to the user.
 
 ## In-progress merge / rebase
 
