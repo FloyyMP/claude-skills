@@ -1,5 +1,6 @@
 ---
 name: audit-setup
+version: 1.0.0
 description: Fully analyse a Claude Code setup — plugins, skills, MCP servers, subagents, slash commands, hooks, settings, CLAUDE.md, permissions. Use when the user asks to audit, review, analyse or clean up their Claude Code setup/config.
 ---
 

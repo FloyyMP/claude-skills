@@ -8,6 +8,9 @@ Public agent skills repo: `FloyyMP/claude-skills`, published via skills.sh. **Th
 - Line endings are LF (`.gitattributes`).
 - Project-specific skills stay in their own project repo (`<project>/.claude/skills/`); everything general-purpose lives here.
 
+## Versioning
+Each `SKILL.md` carries a `version:` field (semver). Bump it on every edit: patch for fixes/wording, minor for new behaviour, major for breaking changes.
+
 ## Workflow (same on every machine)
 Each machine has one clone of this repo. `~/.claude/skills/<name>/` holds **installed copies** made by `npx skills add` (alongside third-party skills), so it is never a git repo and never edited by hand.
 

@@ -1,5 +1,6 @@
 ---
 name: isolate-core
+version: 1.0.0
 description: "Manual-only. Run ONLY when the user explicitly invokes /isolate-core or says \"run isolate-core\". Never trigger on its own. Strips a project to its core source and zips it."
 disable-model-invocation: true
 ---
