@@ -1,3 +1,6 @@
+# Python bytecode from running skill scripts
+__pycache__/
+*.pyc
 # Tool caches written alongside skills, not part of the skill source
 .impeccable/
 *.cache.json
@@ -5,5 +8,3 @@
 *-workspace/
 # Packaged skill bundles, rebuilt from the source folder
 *.zip
-# Own git repo
-complete-session/
