@@ -383,8 +383,14 @@ def main():
     for c in list(f.cwds) + sorted(f.shell_paths):
         # Walk up to an existing ancestor: the command may have named a file it created or deleted.
         p = c
-        while p and p != "/" and not os.path.exists(p):
-            p = os.path.dirname(p)
+        while p and not os.path.exists(p):
+            parent = os.path.dirname(p)
+            # A root is its own parent: "/" on POSIX, and on Windows a "//host" UNC root, which
+            # Git Bash flags (taskkill //F) and URLs (https://cdn...) produce. Stop there.
+            if parent == p:
+                p = None
+                break
+            p = parent
         if not p or p == "/":
             continue
         root = repo_root(p)
