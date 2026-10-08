@@ -5,92 +5,111 @@
   git command run now. Read-only. Exit 0 = every repo clean, 1 = open items.
 
 .DESCRIPTION
-  For each repo: working tree clean, nothing unpushed, on default branch, push
-  actually landed (local HEAD == upstream), no stashes, single worktree, no
-  unmerged branches. The default branch is derived per repo, never hardcoded.
+  Per repo: working tree clean, nothing unpushed, push landed (local HEAD == upstream),
+  no op in progress, on default branch, no stashes, single worktree, no unmerged
+  branches. The default branch is derived per repo, never hardcoded. Port of prove-clean.sh.
 
 .PARAMETER Repo
   One or more repo roots (take them from session-facts ReposTouched). Required.
 
-.PARAMETER Json
-  Emit a JSON array of per-repo results instead of the table.
+.PARAMETER Since
+  Unix seconds; only stashes and branches created at or after it count. Defaults to
+  $env:SINCE, else 0 (count everything).
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string[]]$Repo,
-    [switch]$Json
+    [long]$Since = ($env:SINCE ? [long]$env:SINCE : 0)
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Invoke-RepoGit([string]$root, [string[]]$a) {
+function G([string]$root, [string[]]$a) {
     $out = & git -C $root @a 2>$null
-    [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Out = @($out) }
+    [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Out = @($out | Where-Object { $_ -ne '' }) }
 }
-function Default-Branch([string]$root) {
-    $r = Invoke-RepoGit $root @('symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
-    if ($r.Ok -and $r.Out) { return (($r.Out | Select-Object -First 1) -replace '^origin/', '') }
-    $r = Invoke-RepoGit $root @('remote', 'show', 'origin')
-    if ($r.Ok) { $h = $r.Out | Where-Object { $_ -match 'HEAD branch:\s*(\S+)' } | Select-Object -First 1; if ($h -match 'HEAD branch:\s*(\S+)') { return $Matches[1] } }
-    $r = Invoke-RepoGit $root @('symbolic-ref', '--short', 'HEAD')
-    if ($r.Ok -and $r.Out) { return ($r.Out | Select-Object -First 1) }
-    return $null
+function First($r) { if ($r.Ok -and $r.Out.Count) { $r.Out[0] } }
+
+$script:open = 0
+function Row([string]$label, [bool]$ok, [string]$detail) {
+    if (-not $ok) { $script:open++ }
+    Write-Output ('  {0,-24} {1,-8} {2}' -f $label, ($ok ? 'ok' : 'OPEN'), $detail)
 }
 
-$results = [System.Collections.Generic.List[object]]::new()
-foreach ($root in $Repo) {
-    if (-not (Test-Path -LiteralPath $root)) {
-        $results.Add([pscustomobject]@{ Repo = $root; Error = 'path not found' }); continue
+function LsRemoteHead([string]$root, [string]$rem) {
+    $psi = [Diagnostics.ProcessStartInfo]::new('git')
+    foreach ($x in @('-C', $root, 'ls-remote', '--symref', $rem, 'HEAD')) { $psi.ArgumentList.Add($x) }
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
+    $psi.Environment['GIT_TERMINAL_PROMPT'] = '0'
+    $psi.Environment['GIT_SSH_COMMAND'] = 'ssh -o BatchMode=yes -o ConnectTimeout=5'
+    $p = [Diagnostics.Process]::Start($psi)
+    $out = $p.StandardOutput.ReadToEndAsync(); $null = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(15000)) { $p.Kill($true); return $null }
+    foreach ($l in ($out.Result -split "`r?`n")) { if ($l -match '^ref: refs/heads/(.+)\tHEAD$') { return $Matches[1] } }
+}
+
+function Default-Branch([string]$root) { # $null = unknown -> row is OPEN (fail closed)
+    $cur = First (G $root @('symbolic-ref', '--short', 'HEAD'))
+    $rem = if ($cur) { First (G $root @('config', "branch.$cur.remote")) }
+    if (-not $rem) { $rem = First (G $root @('remote')) }
+    if (-not $rem) { # local-only: never the current branch (tautology)
+        foreach ($b in @((First (G $root @('config', 'init.defaultBranch'))), 'main', 'master')) {
+            if ($b -and (G $root @('show-ref', '-q', '--verify', "refs/heads/$b")).Ok) { return $b }
+        }
+        if ((G $root @('for-each-ref', 'refs/heads')).Out.Count -le 1) { return $cur }
+        return $null
     }
-    $top = Invoke-RepoGit $root @('rev-parse', '--show-toplevel')
-    if (-not $top.Ok) { $results.Add([pscustomobject]@{ Repo = $root; Error = 'not a git repo' }); continue }
-
-    $def = Default-Branch $root
-    $branch = (Invoke-RepoGit $root @('symbolic-ref', '--short', 'HEAD')).Out | Select-Object -First 1
-    if (-not $branch) { $branch = '(detached/unborn)' }
-    $dirty = (Invoke-RepoGit $root @('status', '--porcelain')).Out
-    $hasUp = (Invoke-RepoGit $root @('rev-parse', '--abbrev-ref', '@{u}')).Ok
-    $ahead = 0; $landed = $null
-    if ($hasUp) {
-        $c = (Invoke-RepoGit $root @('rev-list', '--count', '@{u}..HEAD')).Out | Select-Object -First 1
-        if ($c) { $ahead = [int]$c }
-        $local  = (Invoke-RepoGit $root @('rev-parse', 'HEAD')).Out | Select-Object -First 1
-        $remote = (Invoke-RepoGit $root @('rev-parse', '@{u}')).Out | Select-Object -First 1
-        $landed = ($local -and $remote -and $local -eq $remote)
-    }
-    $stashes = @((Invoke-RepoGit $root @('stash', 'list')).Out).Count
-    $wt = @((Invoke-RepoGit $root @('worktree', 'list')).Out).Count
-    $unmerged = 0
-    if ($def) { $unmerged = @((Invoke-RepoGit $root @('branch', '--no-merged', $def)).Out | Where-Object { $_.Trim() }).Count }
-
-    $results.Add([pscustomobject]@{
-        Repo = $root; Branch = $branch; Default = $def
-        Clean = ($dirty.Count -eq 0); DirtyFiles = $dirty.Count
-        HasUpstream = $hasUp; Ahead = $ahead; Landed = $landed
-        OnDefault = ($def -and $branch -eq $def)
-        Stashes = $stashes; Worktrees = $wt; UnmergedBranches = $unmerged
-    })
+    $b = First (G $root @('symbolic-ref', '--short', "refs/remotes/$rem/HEAD"))
+    if ($b) { return $b.Substring($rem.Length + 1) }
+    return LsRemoteHead $root $rem
 }
 
-if ($Json) { $results | ConvertTo-Json -Depth 6; exit (@($results | Where-Object { $_.PSObject.Properties['Error'] -or -not $_.Clean -or ($_.HasUpstream -and $_.Ahead -gt 0) -or $_.Stashes -gt 0 -or $_.Worktrees -gt 1 -or $_.UnmergedBranches -gt 0 }).Count -gt 0 ? 1 : 0) }
+foreach ($r in $Repo) {
+    Write-Output "repo $r"
+    if (-not (Test-Path -LiteralPath $r -PathType Container)) { $script:open++; Write-Output '  ERROR: path not found'; continue }
+    if (-not (G $r @('rev-parse', '--show-toplevel')).Ok) { $script:open++; Write-Output '  ERROR: not a git repo'; continue }
 
-$open = 0
-function Mark([bool]$ok) { if ($ok) { 'ok' } else { $script:open++; 'OPEN' } }
-foreach ($r in $results) {
-    Write-Output "repo $($r.Repo)"
-    if ($r.PSObject.Properties['Error']) { $open++; Write-Output "  ERROR: $($r.Error)"; continue }
-    Write-Output ("  {0,-24} {1,-8} git status --porcelain        ({2} dirty)" -f 'working tree clean', (Mark $r.Clean), $r.DirtyFiles)
-    if ($r.HasUpstream) {
-        Write-Output ("  {0,-24} {1,-8} git rev-list --count @{{u}}..  ({2} ahead)" -f 'nothing unpushed', (Mark ($r.Ahead -eq 0)), $r.Ahead)
-        Write-Output ("  {0,-24} {1,-8} git rev-parse HEAD vs @{{u}}" -f 'push landed (sha match)', (Mark ([bool]$r.Landed)))
+    $def = Default-Branch $r
+    $branch = (First (G $r @('symbolic-ref', '--short', 'HEAD'))) ?? '(detached/unborn)'
+    $dirty = (G $r @('status', '--porcelain')).Out.Count
+    Row 'working tree clean' ($dirty -eq 0) "git status --porcelain        ($dirty dirty)"
+
+    if ((G $r @('rev-parse', '--abbrev-ref', '@{u}')).Ok) {
+        $ahead = [int](First (G $r @('rev-list', '--count', '@{u}..HEAD')))
+        Row 'nothing unpushed' ($ahead -eq 0) "git rev-list --count @{u}..  ($ahead ahead)"
+        $landed = (First (G $r @('rev-parse', 'HEAD'))) -eq (First (G $r @('rev-parse', '@{u}')))
+        Row 'push landed (sha match)' $landed 'git rev-parse HEAD vs @{u}'
+    } elseif ((G $r @('remote')).Out.Count -and (G $r @('rev-parse', '-q', '--verify', 'HEAD')).Ok) { # remote but no/gone upstream
+        $c = G $r @('rev-list', '--count', 'HEAD', '--not', '--remotes')
+        $ahead = $c.Ok ? [int]$c.Out[0] : -1
+        Row 'nothing unpushed' ($ahead -eq 0) "git rev-list --count HEAD --not --remotes ($ahead, no upstream)"
     } else {
-        Write-Output ("  {0,-24} {1,-8} (no upstream)" -f 'nothing unpushed', 'n/a')
+        Write-Output ('  {0,-24} {1,-8} {2}' -f 'nothing unpushed', 'n/a', '(no remote)')
     }
-    Write-Output ("  {0,-24} {1,-8} git symbolic-ref --short HEAD ({2}, default {3})" -f 'on default branch', (Mark ([bool]$r.OnDefault)), $r.Branch, ($r.Default ?? 'none'))
-    Write-Output ("  {0,-24} {1,-8} git stash list                ({2})" -f 'no stashes', (Mark ($r.Stashes -eq 0)), $r.Stashes)
-    Write-Output ("  {0,-24} {1,-8} git worktree list             ({2})" -f 'single worktree', (Mark ($r.Worktrees -le 1)), $r.Worktrees)
-    Write-Output ("  {0,-24} {1,-8} git branch --no-merged {2,-6} ({3})" -f 'no unmerged branches', (Mark ($r.UnmergedBranches -eq 0)), ($r.Default ?? '?'), $r.UnmergedBranches)
+
+    $op = @(foreach ($f in 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply') {
+        $p = First (G $r @('rev-parse', '--path-format=absolute', '--git-path', $f))
+        if ($p -and (Test-Path -LiteralPath $p)) { $f }
+    })
+    Row 'no op in progress' ($op.Count -eq 0) "git rev-parse --git-path …    ($($op ? ($op -join ' ') : 'none'))"
+
+    Row 'on default branch' ([bool]$def -and $branch -eq $def) "git symbolic-ref --short HEAD ($branch, default $($def ?? 'none'))"
+    $stashes = @((G $r @('stash', 'list', '--format=%ct')).Out | Where-Object { [long]$_ -ge $Since }).Count
+    Row 'no stashes' ($stashes -eq 0) "git stash list                ($stashes)"
+    $wt = (G $r @('worktree', 'list')).Out.Count
+    Row 'single worktree' ($wt -le 1) "git worktree list             ($wt)"
+    $unmerged = 0
+    if ($def) {
+        $unmerged = @((G $r @('for-each-ref', "--no-merged=$def", '--format=%(refname)', 'refs/heads')).Out | Where-Object {
+            $oldest = (G $r @('reflog', 'show', '--date=unix', '--format=%gd', $_, '--')).Out | Select-Object -Last 1
+            $created = ($oldest -match '@\{(\d+)\}$') ? [long]$Matches[1] : [long]9999999999
+            $created -ge $Since
+        }).Count
+    }
+    Row 'no unmerged branches' ($unmerged -eq 0) "git branch --no-merged $($def ?? '?')  ($unmerged)"
 }
-Write-Output ""
-Write-Output ($open -eq 0 ? 'ALL CLEAN' : "OPEN ITEMS: $open")
-exit ($open -gt 0 ? 1 : 0)
+
+Write-Output ''
+if ($script:open -eq 0) { Write-Output 'ALL CLEAN'; exit 0 }
+Write-Output "OPEN ITEMS: $($script:open)"
+exit 1

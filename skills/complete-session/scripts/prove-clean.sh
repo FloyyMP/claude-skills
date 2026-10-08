@@ -68,7 +68,7 @@ for r in "$@"; do
     row 'single worktree' "$((wt > 1))" "git worktree list             ($wt)"
     unmerged=0
     [[ -n $def ]] && unmerged=$(git -C "$r" for-each-ref --no-merged="$def" --format='%(refname)' refs/heads 2>/dev/null |
-        while read -r b; do git -C "$r" reflog show --date=unix --format=%gd "$b" -- | tail -1 | tr -dc 0-9 | grep . || echo 9999999999; done |
+        while read -r b; do git -C "$r" reflog show --date=unix --format=%gd "$b" -- | tail -1 | sed -n 's/.*@{\([0-9]*\)}$/\1/p' | grep . || echo 9999999999; done |
         awk -v s="${SINCE:-0}" '$1 >= s' | count)
     row 'no unmerged branches' "$((unmerged != 0))" "git branch --no-merged ${def:-?}  ($unmerged)"
 done
