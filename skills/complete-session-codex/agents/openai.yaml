@@ -1,0 +1,6 @@
+interface:
+  display_name: "Complete Codex Session"
+  short_description: "Verify, land, and prove a Codex session clean"
+  default_prompt: "Use $complete-session-codex to close out this Codex session."
+policy:
+  allow_implicit_invocation: true
