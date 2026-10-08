@@ -4,7 +4,7 @@ Public agent skills repo: `FloyyMP/claude-skills`, published via skills.sh. **Th
 
 ## Layout
 - `skills/<name>/SKILL.md` — one folder per skill (skills.sh / `npx skills` standard), plus optional `references/` and `scripts/`.
-- Scripts ship in pairs where it matters: `.ps1` for Windows, `.sh`/`.py` for Linux.
+- Scripts ship in pairs where it matters: `.ps1` for Windows, `.sh`/`.py` for Linux. The `.sh`/`.py` is the source of truth; any change to it updates the `.ps1` twin in the same commit. No local pwsh? Test with a portable one: the `linux-x64.tar.gz` from PowerShell's GitHub releases, extracted to `/tmp`.
 - Line endings are LF (`.gitattributes`).
 - Project-specific skills stay in their own project repo (`<project>/.claude/skills/`); everything general-purpose lives here.
 

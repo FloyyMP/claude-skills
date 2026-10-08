@@ -10,426 +10,466 @@
   snapshot), shell commands that wrote to disk or changed git state, background
   jobs, subagents, worktrees entered, files handed to the user, questions asked,
   skills invoked, schedulers, the last todo list, compaction count + tokens
-  dropped, and the scratchpad directory.
+  dropped, and the session temp dir. Port of session-facts.py.
 
   Read-only. Runs git plumbing (rev-parse, status, rev-list, stash/worktree list)
   against touched repos and nothing else.
 
 .PARAMETER SessionId
-  The session UUID. Take it from the scratchpad path in the system prompt
-  (.../claude/<slug>/<session-id>/scratchpad). If omitted, the newest transcript
-  under ~/.claude/projects is used and a warning is printed - with parallel
-  sessions that can be the wrong one.
+  Defaults to $env:CLAUDE_CODE_SESSION_ID; failing that, the newest transcript is
+  used and a warning is printed.
 
 .PARAMETER Json
-  Emit a single JSON object instead of the human-readable report.
+  Emit one JSON object instead of the human-readable report.
 #>
 [CmdletBinding()]
 param(
-    [string]$SessionId,
+    [string]$SessionId = $env:CLAUDE_CODE_SESSION_ID,
     [switch]$Json
 )
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$inv = [cultureinfo]::InvariantCulture
 $projectsRoot = Join-Path $HOME '.claude' 'projects'
+$ic = [Text.RegularExpressions.RegexOptions]::IgnoreCase
 
-# ---------- locate the transcript ----------
-$warnings = [System.Collections.Generic.List[string]]::new()
-if ($SessionId) {
-    $transcript = Get-ChildItem -Path $projectsRoot -Filter "$SessionId.jsonl" -Recurse -File -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $transcript) { throw "No transcript named $SessionId.jsonl under $projectsRoot" }
-} else {
-    $transcript = Get-ChildItem -Path $projectsRoot -Filter '*.jsonl' -Recurse -File -Depth 1 -ErrorAction SilentlyContinue |
-        Where-Object { $_.Directory.FullName -eq (Split-Path $_.FullName -Parent) -and $_.Directory.Parent.FullName -eq $projectsRoot } |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $transcript) { throw "No transcripts found under $projectsRoot" }
-    $SessionId = $transcript.BaseName
-    $warnings.Add("No -SessionId given; using newest transcript ($SessionId). With parallel sessions this may be the wrong one.")
+$gitWriteRx = [regex]::new('\bgit(\s+-[Cc]\s+\S+)*\s+(commit|push|stash\s+(push|pop|apply|drop|save)|stash\s*($|[;&|])|switch\s+-c|checkout\s+(-b|--)|worktree\s+add|rebase|merge|reset|branch\s+-[dDm]|tag\s+(?!-l)\S|cherry-pick|am|add|rm|mv|apply|restore|revert|pull|clean|init)\b', $ic)
+# Writes the model does through the shell: redirects (not `->` / `>=`), in-place editors, heredoc scripts that write
+# files, formatters/package managers that rewrite the tree, and the PowerShell file cmdlets.
+$fsWriteRx = [regex]::new('(?<![\d\-=])>{1,2}\s*[^&\s=]|\bsed\s+-i\b|\bperl\s+-[a-z]*i|\brm\s|\bmv\s|\bcp\s|\btee\b|\bmkdir\b|\btouch\b|\bunlink\b|\bln\s+-s\b|\bchmod\b|\binstall\s+-|\bpatch\b|\.write_(text|bytes)\(|\bopen\([^)]*[''"][wax]b?\+?[''"]|--write\b|--fix\b|\b(npm|pnpm|yarn)\s+(install|i|add|ci|update)\b|\buv\s+(add|remove|lock|sync)\b|\bcargo\s+fmt\b|\bruff\s+format\b(?!\s+--check)|\b(Set-Content|Out-File|Add-Content|New-Item|Copy-Item|Move-Item|Remove-Item|Rename-Item)\b', $ic)
+# Absolute paths in shell commands (/..., ~/..., $HOME/..., C:\..., quoted with spaces) - feeds shell-touched repo detection.
+$pathRx = [regex]::new('(?<![\w/.])(?:/|~[/\\]|\$HOME[/\\]|\$\{HOME\}[/\\]|[A-Za-z]:[/\\])[^\s''"`|;&<>()]*|(?<=")(?:/|[A-Za-z]:[/\\])[^"]+(?=")|(?<='')(?:/|[A-Za-z]:[/\\])[^'']+(?='')')
+# Relative targets too: `cd ../lib && ...`, `git -C other commit` - resolved against the record's cwd.
+$cdRx = [regex]::new('(?:\bcd|\bSet-Location|\bPush-Location|\s-C)\s+(?:"([^"]+)"|''([^'']+)''|([^\s;&|)]+))')
+$processRx = [regex]::new('\bnohup\b|\bsetsid\b|\bdisown\b|\bnpm\s+(run\s+)?(dev|start)\b|\bpnpm\s+(run\s+)?(dev|start)\b|\byarn\s+(dev|start)\b|\bgo\s+run\b|\buvicorn\b|\bflask\s+run\b|\bnext\s+(dev|start)\b|\bvite\b(?!\.config)|\bpython3?\s+-m\s+http\.server\b|\bssh\s+-[fN]|\bdocker(-compose|\s+compose)?\s+(run|up)\b|\bpm2\s+start\b|\btmux\s+new|\bscreen\s+-d|\bsystemd-run\b|\b(Start-Process|Start-Job)\b', $ic)
+# A bare `&` backgrounds in bash but is the call operator in PowerShell, so only Bash commands get this check.
+$bashAmpRx = [regex]::new('(?<![&>|])&(?![&>\d])')
+
+function Norm-Ts($ts) { # ConvertFrom-Json turns ISO strings into DateTime; restore the transcript's format
+    if ($ts -is [datetime]) { return $ts.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", $inv) }
+    if ($ts) { return [string]$ts }
+    return $null
 }
-$projectDir = $transcript.Directory.FullName
-$sessionDir = Join-Path $projectDir $SessionId
-$subagentFiles = @()
-if (Test-Path (Join-Path $sessionDir 'subagents')) {
-    $subagentFiles = @(Get-ChildItem (Join-Path $sessionDir 'subagents') -Filter '*.jsonl' -File)
+function Parse-Ts([string]$ts) { [DateTimeOffset]::Parse($ts, $inv) }
+function Trunc([string]$s, [int]$n) { if ($s.Length -le $n) { $s } else { $s.Substring(0, $n - 3) + '...' } }
+function One-Line([string]$s) { ($s -split '\s+' | Where-Object { $_ }) -join ' ' }
+function Str($v) { if (-not $v) { '' } elseif ($v -is [datetime]) { Norm-Ts $v } else { [string]$v } }  # str(x or "")
+function First-NonEmpty([Collections.IDictionary]$d, [string[]]$keys) {
+    foreach ($k in $keys) { $v = $d[$k]; if ($null -ne $v -and ([string]$v).Trim()) { return [string]$v } }
+    return $null
 }
-
-# ---------- accumulators ----------
-$edits      = [ordered]@{}   # path -> @{ Count; Tools; Sidechain; First }
-$shell      = [System.Collections.Generic.List[object]]::new()
-$background  = [System.Collections.Generic.List[object]]::new()
-$agents     = [System.Collections.Generic.List[object]]::new()
-$schedulers = [System.Collections.Generic.List[object]]::new()
-$worktrees  = [System.Collections.Generic.List[object]]::new()
-$handoffs   = [System.Collections.Generic.List[object]]::new()
-$questions  = [System.Collections.Generic.List[object]]::new()
-$skills     = [System.Collections.Generic.List[object]]::new()
-$lastTodos  = $null
-$cwds       = [System.Collections.Generic.HashSet[string]]::new()
-$branches   = [System.Collections.Generic.HashSet[string]]::new()
-$firstTs = $null; $lastTs = $null
-$compactions = 0; $droppedTokens = 0; $userTurns = 0; $assistantTurns = 0; $toolCalls = 0; $badLines = 0
-
-$gitWriteRx = '(?i)\bgit\b.*\b(commit|push|stash|switch\s+-c|checkout\s+-b|worktree\s+add|rebase|merge|reset|branch\s+-[dDm]|tag|cherry-pick|am)\b'
-$fsWriteRx  = '(?i)(?<!\d)>{1,2}\s*[^&\s]|\bsed\s+-i\b|\bSet-Content\b|\bOut-File\b|\bAdd-Content\b|\bNew-Item\b|\bCopy-Item\b|\bMove-Item\b|\bRemove-Item\b|\brm\s+-|\bmv\s|\bcp\s|\btee\b|\bmkdir\b|\bRename-Item\b|\btouch\b|\bunlink\b'
-$processRx  = '(?i)\bStart-Process\b|\bStart-Job\b|\bnohup\b|&\s*$|\bnpm\s+(run\s+)?(dev|start)\b|\bpnpm\s+(run\s+)?dev\b|\byarn\s+dev\b|\bgo\s+run\b|\buvicorn\b|\bflask\s+run\b|\bnext\s+dev\b|\bvite\b|\bpython\s+-m\s+http\.server\b|\bssh\s+-[fN]'
-
-function Add-Edit([string]$path, [string]$tool, [bool]$sidechain, [string]$ts) {
-    if ([string]::IsNullOrWhiteSpace($path)) { return }
-    if (-not $edits.Contains($path)) {
-        $edits[$path] = @{ Count = 0; Tools = [System.Collections.Generic.HashSet[string]]::new(); Sidechain = $false; First = $ts }
+function To-JsonStr($v) { $v | ConvertTo-Json -Compress -Depth 20 }
+function Expand-Home([string]$p) { $p -replace '^(~|\$HOME|\$\{HOME\})(?=[/\\])', $HOME.Replace('$', '$$') }
+function Full-Path([string]$p) {
+    if ($IsWindows -and $p -match '^/([A-Za-z])(/.*)?$') { $p = "$($Matches[1]):$($Matches[2] ?? '/')" } # Git Bash /c/... -> C:/...
+    return [IO.Path]::GetFullPath($p)
+}
+function Real-Path([string]$p) {
+    # ponytail: resolves a symlinked final component only; walk every component if nested links matter
+    $full = Full-Path (Expand-Home $p)
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+    if ($item -and $item.LinkTarget) { $t = $item.ResolveLinkTarget($true); if ($t) { return $t.FullName } }
+    return $full
+}
+function First-Uuid([string]$path) {
+    foreach ($line in [IO.File]::ReadLines($path)) {
+        try { $u = ($line | ConvertFrom-Json -AsHashtable -Depth 1024)['uuid'] } catch { continue }
+        if ($u) { return $u }
     }
-    $e = $edits[$path]
-    $e.Count++
-    [void]$e.Tools.Add($tool)
-    if ($sidechain) { $e.Sidechain = $true }
-}
-
-function First-NonEmpty([System.Collections.IDictionary]$h, [string[]]$keys) {
-    foreach ($k in $keys) { if ($h.Contains($k) -and -not [string]::IsNullOrWhiteSpace([string]$h[$k])) { return [string]$h[$k] } }
     return $null
 }
 
-function Read-Transcript([string]$file, [bool]$forceSidechain) {
-    foreach ($line in [System.IO.File]::ReadLines($file)) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        try { $r = $line | ConvertFrom-Json -Depth 64 -AsHashtable } catch { $script:badLines++; continue }
-        $type = $r['type']
-        $ts = $r['timestamp']
-        if ($ts) {
-            if (-not $script:firstTs -or $ts -lt $script:firstTs) { $script:firstTs = $ts }
-            if (-not $script:lastTs  -or $ts -gt $script:lastTs)  { $script:lastTs  = $ts }
-        }
-        if ($r['cwd'])       { [void]$script:cwds.Add($r['cwd']) }
-        if ($r['gitBranch']) { [void]$script:branches.Add($r['gitBranch']) }
-        $sidechain = $forceSidechain -or ($r['isSidechain'] -eq $true)
+# ---------- locate the transcript ----------
+$warnings = [Collections.Generic.List[string]]::new()
+if ($SessionId) {
+    $transcript = Get-ChildItem -Path (Join-Path $projectsRoot '*' "$SessionId.jsonl") -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $transcript) { Write-Error "No transcript named $SessionId.jsonl under $projectsRoot"; exit 1 }
+} else {
+    $transcript = Get-ChildItem -Path (Join-Path $projectsRoot '*' '*.jsonl') -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if (-not $transcript) { Write-Error "No transcripts found under $projectsRoot"; exit 1 }
+    $SessionId = $transcript.BaseName
+    $warnings.Add("No session id given and `$CLAUDE_CODE_SESSION_ID unset; using newest transcript ($SessionId). With parallel sessions this may be the wrong one.")
+}
+$projectDir = $transcript.DirectoryName
+# A resumed session gets a new id whose transcript copies the old history, but the old id keeps its
+# subagents and tmp dir: siblings that start with the same record are the same session.
+$ids = [Collections.Generic.List[string]]::new(); $ids.Add($SessionId)
+$head = First-Uuid $transcript.FullName
+foreach ($p in Get-ChildItem -LiteralPath $projectDir -Filter '*.jsonl' -File) {
+    if ($p.BaseName -ne $SessionId -and $head -and (First-Uuid $p.FullName) -eq $head) { $ids.Add($p.BaseName) }
+}
+# Workflow agents nest under subagents/workflows/<run>/; journal.jsonl is the workflow's log, not an agent.
+$subFiles = [string[]]@(foreach ($i in $ids) {
+    $d = Join-Path $projectDir $i 'subagents'
+    if (Test-Path -LiteralPath $d -PathType Container) {
+        Get-ChildItem -LiteralPath $d -Filter '*.jsonl' -File -Recurse | Where-Object Name -ne 'journal.jsonl' | ForEach-Object FullName
+    }
+})
+[Array]::Sort($subFiles, [StringComparer]::Ordinal)
 
-        if ($type -eq 'system' -and $r['subtype'] -eq 'compact_boundary') {
-            $script:compactions++
-            $meta = $r['compactMetadata']
-            if ($meta -is [System.Collections.IDictionary] -and $meta['cumulativeDroppedTokens']) {
-                $v = [long]$meta['cumulativeDroppedTokens']
-                if ($v -gt $script:droppedTokens) { $script:droppedTokens = $v }
+# ---------- accumulators ----------
+$edits = [ordered]@{}   # path -> @{ count; tools; sidechain }
+$shell = [Collections.Generic.List[object]]::new(); $background = [Collections.Generic.List[object]]::new()
+$agents = [Collections.Generic.List[object]]::new(); $schedulers = [Collections.Generic.List[object]]::new()
+$worktrees = [Collections.Generic.List[object]]::new(); $handoffs = [Collections.Generic.List[object]]::new()
+$questions = [Collections.Generic.List[object]]::new(); $skills = [Collections.Generic.List[object]]::new()
+$lastTodos = $null
+$tasks = [ordered]@{}; $pendingCreates = @{}   # TaskCreate/TaskUpdate (the todo tools since TodoWrite was retired)
+$cwds = [Collections.Generic.List[string]]::new(); $branches = [Collections.Generic.List[string]]::new()
+$shellPaths = [Collections.Generic.HashSet[string]]::new()
+$agentIds = [Collections.Generic.HashSet[string]]::new()  # a fork's transcript opens with a replay of the Agent call that launched it
+$firstTs = $null; $lastTs = $null
+$compactions = 0; [long]$dropped = 0; $userTurns = 0; $assistantTurns = 0; $toolCalls = 0; $badLines = 0
+
+function Add-Edit([string]$path, [string]$tool, [bool]$sidechain) {
+    if (-not $path.Trim()) { return }
+    $path = Real-Path $path  # a symlinked path and its target are one file
+    if (-not $edits.Contains($path)) { $edits[$path] = @{ count = 0; tools = [Collections.Generic.HashSet[string]]::new(); sidechain = $false } }
+    $e = $edits[$path]; $e.count++; [void]$e.tools.Add($tool); if ($sidechain) { $e.sidechain = $true }
+}
+
+function Tool-Use([string]$name, [Collections.IDictionary]$inp, $ts, [bool]$sidechain, [string]$cwd, $useId) {
+    switch -Regex ($name) {
+        '^(Edit|Write|MultiEdit)$' { Add-Edit (Str $inp['file_path']) $name $sidechain; return }
+        '^NotebookEdit$' { Add-Edit (Str $inp['notebook_path']) $name $sidechain; return }
+        '^(Bash|PowerShell)$' {
+            $cmd = Str $inp['command']
+            $flags = [Collections.Generic.List[string]]::new()
+            if ($inp['run_in_background'] -eq $true) { $flags.Add('background') }
+            if ($gitWriteRx.IsMatch($cmd)) { $flags.Add('git-write') }
+            if ($fsWriteRx.IsMatch($cmd)) { $flags.Add('fs-write') }
+            if ($processRx.IsMatch($cmd) -or ($name -eq 'Bash' -and $bashAmpRx.IsMatch($cmd))) { $flags.Add('process') }
+            # cd / -C targets from EVERY command: `cd ../lib && ./fmt.sh` writes without any write-looking token.
+            # Inclusion below still needs dirty/unpushed state, and PreExistingDirty separates the user's own WIP.
+            foreach ($m in $cdRx.Matches($cmd)) {
+                $g = @($m.Groups[1], $m.Groups[2], $m.Groups[3] | Where-Object Success)[0].Value
+                $p = Expand-Home $g
+                try { if ($cwd -and -not [IO.Path]::IsPathRooted($p)) { $p = [IO.Path]::GetFullPath((Join-Path $cwd $p)) } } catch { continue }
+                if ([IO.Path]::IsPathRooted($p)) { [void]$shellPaths.Add($p) }
             }
-            continue
+            if ($flags.Count) {
+                foreach ($m in $pathRx.Matches($cmd)) { [void]$shellPaths.Add((Expand-Home $m.Value)) }
+                $rec = [ordered]@{ Time = $ts; Tool = $name; Flags = ($flags -join ','); Sidechain = $sidechain; Command = (Trunc (One-Line $cmd) 180) }
+                $shell.Add($rec)
+                if ($flags -contains 'background') { $background.Add($rec) }
+            }
+            return
         }
-        if ($type -eq 'user' -and -not $sidechain -and -not $r['isMeta']) {
-            # Tool results come back as 'user' records too; count only real prompts.
-            $uc = $r['message']?['content']
-            $isPrompt = ($uc -is [string]) -or
-                ($uc -is [System.Collections.IList] -and -not ($uc | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['type'] -eq 'tool_result' }))
-            if ($isPrompt) { $script:userTurns++ }
+        '^Agent$' {
+            if ($useId -and $agentIds.Contains($useId)) { return }
+            [void]$agentIds.Add([string]$useId)
+            $iso = Str $inp['isolation']
+            $agents.Add([ordered]@{ Time = $ts; Type = (Str $inp['subagent_type']); Description = (Str $inp['description']); Isolation = $iso; Sidechain = $sidechain })
+            if ($iso -eq 'worktree') { $worktrees.Add([ordered]@{ Time = $ts; Tool = 'Agent(isolation:worktree)'; Detail = (Str $inp['description']) }) }
+            return
         }
-        if ($type -ne 'assistant') { continue }
-        if (-not $sidechain) { $script:assistantTurns++ }
+        '^(EnterWorktree|ExitWorktree)$' {
+            $detail = (First-NonEmpty $inp @('path', 'name', 'branch', 'worktree', 'description')) ?? (To-JsonStr $inp)
+            $worktrees.Add([ordered]@{ Time = $ts; Tool = $name; Detail = $detail }); return
+        }
+        '^SendUserFile$' {
+            $p = First-NonEmpty $inp @('path', 'file_path', 'filePath', 'file')
+            $handoffs.Add([ordered]@{ Time = $ts; Path = ($p ?? '(unknown path)'); Sidechain = $sidechain }); return
+        }
+        '^AskUserQuestion$' {
+            $hdrs = @(if ($inp['questions'] -is [Collections.IList]) { foreach ($q in $inp['questions']) { if ($q -is [Collections.IDictionary]) { Str $q['header'] } } })
+            $questions.Add([ordered]@{ Time = $ts; Headers = ($hdrs -join ', ') }); return
+        }
+        '^Skill$' { $skills.Add([ordered]@{ Time = $ts; Name = (Str $inp['skill']); Args = (Str $inp['args']) }); return }
+        '^(CronCreate|ScheduleWakeup|Monitor|RemoteTrigger)$' {
+            $summary = if ($inp['prompt']) { Str $inp['prompt'] } elseif ($inp['command']) { Str $inp['command'] } else { To-JsonStr $inp }
+            $schedulers.Add([ordered]@{ Time = $ts; Tool = $name; Detail = (Trunc $summary 140) }); return
+        }
+        '^Workflow$|__preview_start$|__run_in_terminal$' {
+            # Workflows run in the background; preview/terminal MCP tools start servers the window close kills.
+            $detail = foreach ($k in 'scriptPath', 'name', 'command', 'script') { if ($inp[$k]) { Str $inp[$k]; break } }
+            if (-not $detail) { $detail = To-JsonStr $inp }
+            $background.Add([ordered]@{ Time = $ts; Tool = $name; Flags = 'background'; Sidechain = $sidechain; Command = "${name}: " + (Trunc (One-Line $detail) 160) })
+            return
+        }
+        '^TodoWrite$' { if (-not $sidechain) { $script:lastTodos = $inp['todos'] }; return }
+        '^TaskCreate$' { if (-not $sidechain -and $useId) { $pendingCreates[$useId] = (First-NonEmpty $inp @('subject', 'description')) ?? '' }; return }
+        '^TaskUpdate$' {
+            if ($sidechain) { return }
+            $id = Str $inp['taskId']; if ($null -eq $inp['taskId']) { $id = 'None' }
+            if (-not $tasks.Contains($id)) { $tasks[$id] = [ordered]@{ Status = 'pending'; Content = '(created before this transcript)' } }
+            if ($inp['status']) { $tasks[$id].Status = Str $inp['status'] }
+            if ($inp['subject']) { $tasks[$id].Content = Str $inp['subject'] }
+        }
+    }
+}
 
-        $content = $r['message']?['content']
-        if ($content -isnot [System.Collections.IList]) { continue }
+function Read-Record([Collections.IDictionary]$r, [bool]$forceSidechain) {
+    $typ = $r['type']; $ts = Norm-Ts $r['timestamp']
+    if ($ts) {
+        if (-not $script:firstTs -or [string]::CompareOrdinal($ts, $script:firstTs) -lt 0) { $script:firstTs = $ts }
+        if (-not $script:lastTs -or [string]::CompareOrdinal($ts, $script:lastTs) -gt 0) { $script:lastTs = $ts }
+    }
+    if ($r['cwd'] -and -not $cwds.Contains([string]$r['cwd'])) { $cwds.Add([string]$r['cwd']) }
+    if ($r['gitBranch'] -and -not $branches.Contains([string]$r['gitBranch'])) { $branches.Add([string]$r['gitBranch']) }
+    $sidechain = $forceSidechain -or ($r['isSidechain'] -eq $true)
+
+    if ($typ -eq 'worktree-state' -and $r['worktreeSession'] -is [Collections.IDictionary]) {  # `claude -w <name>` sessions
+        $ws = $r['worktreeSession']
+        $detail = "$(Str $ws['worktreePath']) (branch $(Str $ws['worktreeBranch']), from $(Str $ws['originalBranch']))"
+        if (-not ($worktrees | Where-Object { $_.Detail -eq $detail })) { $worktrees.Add([ordered]@{ Time = $ts; Tool = 'claude --worktree'; Detail = $detail }) }
+        return
+    }
+    if ($typ -eq 'system' -and $r['subtype'] -eq 'compact_boundary') {
+        $script:compactions++
+        $meta = $r['compactMetadata']
+        if ($meta -is [Collections.IDictionary] -and $meta['cumulativeDroppedTokens']) {
+            $script:dropped = [math]::Max($script:dropped, [long]$meta['cumulativeDroppedTokens'])
+        }
+        return
+    }
+    $msg = if ($r['message'] -is [Collections.IDictionary]) { $r['message'] } else { @{} }
+    $content = $msg['content']
+    if ($typ -eq 'user' -and -not $sidechain -and $content -is [Collections.IList] -and $pendingCreates.Count) {
+        # TaskCreate's id only appears in its result: "Task #3 created successfully".
         foreach ($b in $content) {
-            if ($b -isnot [System.Collections.IDictionary] -or $b['type'] -ne 'tool_use') { continue }
-            $script:toolCalls++
-            $name = [string]$b['name']
-            $in = $b['input']
-            if ($in -isnot [System.Collections.IDictionary]) { $in = @{} }
-            switch -Regex ($name) {
-                '^(Edit|Write|MultiEdit)$' { Add-Edit ([string]$in['file_path']) $name $sidechain $ts }
-                '^NotebookEdit$'          { Add-Edit ([string]$in['notebook_path']) $name $sidechain $ts }
-                '^(Bash|PowerShell)$' {
-                    $cmd = [string]$in['command']
-                    $flags = [System.Collections.Generic.List[string]]::new()
-                    if ($in['run_in_background'] -eq $true) { $flags.Add('background') }
-                    if ($cmd -match $gitWriteRx) { $flags.Add('git-write') }
-                    if ($cmd -match $fsWriteRx)  { $flags.Add('fs-write') }
-                    if ($cmd -match $processRx)  { $flags.Add('process') }
-                    if ($flags.Count -gt 0) {
-                        $one = ($cmd -replace '\s+', ' ').Trim()
-                        if ($one.Length -gt 180) { $one = $one.Substring(0, 177) + '...' }
-                        $rec = [pscustomobject]@{ Time = $ts; Tool = $name; Flags = ($flags -join ','); Sidechain = $sidechain; Command = $one }
-                        $script:shell.Add($rec)
-                        if ($flags -contains 'background') { $script:background.Add($rec) }
-                    }
-                }
-                '^Agent$' {
-                    $iso = [string]$in['isolation']
-                    $script:agents.Add([pscustomobject]@{
-                        Time = $ts; Type = [string]$in['subagent_type']; Description = [string]$in['description']; Isolation = $iso; Sidechain = $sidechain })
-                    if ($iso -eq 'worktree') {
-                        $script:worktrees.Add([pscustomobject]@{ Time = $ts; Tool = 'Agent(isolation:worktree)'; Detail = [string]$in['description'] })
-                    }
-                }
-                '^(EnterWorktree|ExitWorktree)$' {
-                    $detail = First-NonEmpty $in @('path','name','branch','worktree','description')
-                    if (-not $detail) { $detail = ($in | ConvertTo-Json -Compress -Depth 4) }
-                    $script:worktrees.Add([pscustomobject]@{ Time = $ts; Tool = $name; Detail = $detail })
-                }
-                '^SendUserFile$' {
-                    $p = First-NonEmpty $in @('path','file_path','filePath','file')
-                    $script:handoffs.Add([pscustomobject]@{ Time = $ts; Path = ($p ?? '(unknown path)'); Sidechain = $sidechain })
-                }
-                '^AskUserQuestion$' {
-                    $hdrs = @()
-                    if ($in['questions'] -is [System.Collections.IList]) {
-                        $hdrs = @($in['questions'] | ForEach-Object { if ($_ -is [System.Collections.IDictionary]) { [string]$_['header'] } })
-                    }
-                    $script:questions.Add([pscustomobject]@{ Time = $ts; Headers = ($hdrs -join ', ') })
-                }
-                '^Skill$' {
-                    $script:skills.Add([pscustomobject]@{ Time = $ts; Name = [string]$in['skill']; Args = [string]$in['args'] })
-                }
-                '^(CronCreate|ScheduleWakeup|Monitor|RemoteTrigger)$' {
-                    $summary = if ($in['prompt']) { [string]$in['prompt'] } elseif ($in['command']) { [string]$in['command'] } else { ($in | ConvertTo-Json -Compress -Depth 4) }
-                    if ($summary.Length -gt 140) { $summary = $summary.Substring(0, 137) + '...' }
-                    $script:schedulers.Add([pscustomobject]@{ Time = $ts; Tool = $name; Detail = $summary })
-                }
-                '^TodoWrite$' { if (-not $sidechain) { $script:lastTodos = $in['todos'] } }
+            if ($b -is [Collections.IDictionary] -and $b['type'] -eq 'tool_result' -and $b['tool_use_id'] -and $pendingCreates.ContainsKey($b['tool_use_id'])) {
+                $subject = $pendingCreates[$b['tool_use_id']]; $pendingCreates.Remove($b['tool_use_id'])
+                if ((To-JsonStr $b['content']) -match 'Task #(\d+)') { $tasks[$Matches[1]] = [ordered]@{ Status = 'pending'; Content = $subject } }
             }
         }
+    }
+    if ($typ -eq 'user' -and -not $sidechain -and -not $r['isMeta']) {
+        # Tool results come back as 'user' records too; count only real prompts.
+        if ($content -is [string] -or ($content -is [Collections.IList] -and
+                -not ($content | Where-Object { $_ -is [Collections.IDictionary] -and $_['type'] -eq 'tool_result' }))) { $script:userTurns++ }
+    }
+    if ($typ -ne 'assistant') { return }
+    if (-not $sidechain) { $script:assistantTurns++ }
+    if ($content -isnot [Collections.IList]) { return }
+    foreach ($b in $content) {
+        if ($b -isnot [Collections.IDictionary] -or $b['type'] -ne 'tool_use') { continue }
+        $script:toolCalls++
+        $inp = if ($b['input'] -is [Collections.IDictionary]) { $b['input'] } else { @{} }
+        Tool-Use (Str $b['name']) $inp $ts $sidechain (Str $r['cwd']) $b['id']
+    }
+}
+
+function Read-Transcript([string]$file, [bool]$forceSidechain) {
+    foreach ($line in [IO.File]::ReadLines($file)) {
+        if (-not $line.Trim()) { continue }
+        try { $r = $line | ConvertFrom-Json -AsHashtable -Depth 1024 } catch { $script:badLines++; continue }
+        if ($r -isnot [Collections.IDictionary]) { continue }
+        try { Read-Record $r $forceSidechain } catch { $script:badLines++ }  # one odd record must not sink the whole report
     }
 }
 
 Read-Transcript $transcript.FullName $false
-foreach ($sf in $subagentFiles) { Read-Transcript $sf.FullName $true }
+foreach ($sf in $subFiles) { Read-Transcript $sf $true }
+$since = if ($firstTs) { (Parse-Ts $firstTs).UtcDateTime } else { $null }
 
-# ---------- group edits by git repo ----------
+# ---------- git helpers ----------
+function Invoke-Git([string]$root, [string[]]$a) {
+    $out = & git -C $root @a 2>$null
+    [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Out = @($out | Where-Object { $_ -and $_.Trim() }) }
+}
+function Git-First($r) { if ($r.Ok -and $r.Out.Count) { $r.Out[0] } }
+
 $repoCache = @{}
-function Get-RepoRoot([string]$path) {
-    $dir = if (Test-Path -LiteralPath $path -PathType Container) { $path } else { Split-Path -Parent $path }
-    if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
-    if ($repoCache.ContainsKey($dir)) { return $repoCache[$dir] }
-    $root = $null
-    if (Test-Path -LiteralPath $dir) {
-        $out = & git -C $dir rev-parse --show-toplevel 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out) { $root = ($out | Select-Object -First 1) -replace '/', '\' }
+function Repo-Root([string]$path) {
+    $d = if (Test-Path -LiteralPath $path -PathType Container) { $path } else { [IO.Path]::GetDirectoryName($path) }
+    while ($d -and $d -ne '/' -and -not (Test-Path -LiteralPath $d -PathType Container)) { $d = [IO.Path]::GetDirectoryName($d) }  # the file's directory may have been deleted since
+    if (-not $d) { return $null }
+    if (-not $repoCache.ContainsKey($d)) {
+        $top = Git-First (Invoke-Git $d @('rev-parse', '--show-toplevel'))
+        $repoCache[$d] = if ($top) { [IO.Path]::GetFullPath($top) } else { $null }
     }
-    $repoCache[$dir] = $root
-    return $root
+    return $repoCache[$d]
 }
 
-$byRepo = [ordered]@{}
-foreach ($p in $edits.Keys) {
-    $root = Get-RepoRoot $p
-    $key = if ($root) { $root } else { '(not in a git repo)' }
-    if (-not $byRepo.Contains($key)) { $byRepo[$key] = [System.Collections.Generic.List[object]]::new() }
-    $e = $edits[$p]
-    $byRepo[$key].Add([pscustomobject]@{
-        Path = $p; Edits = $e.Count; Tools = (($e.Tools | Sort-Object) -join '+'); Sidechain = $e.Sidechain
-        Exists = (Test-Path -LiteralPath $p)
-    })
-}
-$repos = @($byRepo.Keys | Where-Object { $_ -ne '(not in a git repo)' })
-
-# ---------- live git state per touched repo ----------
-# First output line of a git command, or $null on a non-zero exit. Collect the output before
-# trimming it: piping a native command into Select-Object -First stops the pipeline early and
-# leaves $LASTEXITCODE holding the previous command's code.
-function Get-GitLine([string]$root) {
-    $out = @(& git -C $root @args 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
-    $out | Select-Object -First 1
+function Default-Branch([string]$root, [string]$branch) {
+    # Offline: <remote>/HEAD, else <remote>/main|master. $null when unknown (never guess the current branch).
+    $rem = (Git-First (Invoke-Git $root @('config', "branch.$branch.remote"))) ?? (Git-First (Invoke-Git $root @('remote')))
+    if (-not $rem) { return $null }
+    $b = Git-First (Invoke-Git $root @('symbolic-ref', '--short', "refs/remotes/$rem/HEAD"))
+    if ($b) { return $b.Substring($rem.Length + 1) }
+    foreach ($c in 'main', 'master') { if ((Invoke-Git $root @('rev-parse', '-q', '--verify', "refs/remotes/$rem/$c")).Ok) { return $c } }
+    return $null
 }
 
-function Get-RepoState([string]$root) {
-    $branch = Get-GitLine $root symbolic-ref --short HEAD
-    if (-not $branch) { $branch = '(detached/unborn)' }
-    $dirty = @(& git -C $root status --porcelain 2>$null)
-    $up = Get-GitLine $root rev-parse --abbrev-ref '@{u}'
-    $hasUp = [bool]$up
+function Repo-State([string]$root) {
+    $branch = (Git-First (Invoke-Git $root @('symbolic-ref', '--short', 'HEAD'))) ?? '(detached/unborn)'
+    $porcelain = (Invoke-Git $root @('status', '--porcelain')).Out
+    # Dirty paths untouched since the session started are the user's own work, not ours to commit.
+    $pre = @(if ($since) { foreach ($l in $porcelain) {
+        $f = Join-Path $root (($l.Substring(3) -split ' -> ')[-1].Trim('"'))
+        if ((Test-Path -LiteralPath $f) -and (Get-Item -LiteralPath $f -Force).LastWriteTimeUtc -lt $since) { 1 }
+    } }).Count
+    $hasUp = (Invoke-Git $root @('rev-parse', '--abbrev-ref', '@{u}')).Ok
     $ahead = 0
     if ($hasUp) {
-        $c = Get-GitLine $root rev-list --count '@{u}..HEAD'
-        if ($c) { $ahead = [int]$c }
+        $c = Git-First (Invoke-Git $root @('rev-list', '--count', '@{u}..HEAD')); if ($c) { $ahead = [int]$c }
+    } elseif ((Invoke-Git $root @('remote')).Out.Count) {  # remote but no upstream: commits on no remote at all are still unpushed
+        $c = Git-First (Invoke-Git $root @('rev-list', '--count', 'HEAD', '--not', '--remotes')); $ahead = if ($c) { [int]$c } else { 0 }
     }
-    $def = Get-GitLine $root symbolic-ref --short refs/remotes/origin/HEAD
-    if ($def) { $def = $def -replace '^origin/', '' }
-    $stashes = @(& git -C $root stash list 2>$null).Count
-    $wt = @(& git -C $root worktree list 2>$null).Count
-    [pscustomobject]@{
-        Repo = $root; Branch = $branch; Default = $def; DirtyFiles = $dirty.Count
-        HasUpstream = [bool]$hasUp; Ahead = $ahead; Stashes = $stashes; Worktrees = $wt
+    $default = Default-Branch $root $branch
+    $unmerged = 0
+    if ($default -and $branch -notin @($default, '(detached/unborn)')) {
+        $c = Git-First (Invoke-Git $root @('rev-list', '--count', "$default..HEAD")); $unmerged = if ($c) { [int]$c } else { 0 }
     }
-}
-$repoState = [System.Collections.Generic.List[object]]::new()
-foreach ($r in $repos) { $repoState.Add((Get-RepoState $r)) }
-
-# ---------- scratchpad ----------
-$scratchpad = $null
-$primaryCwd = if ($cwds.Count -gt 0) { ($cwds | Select-Object -First 1) } else { $null }
-if ($primaryCwd) {
-    $slug = $primaryCwd -replace '[:\\/]', '-'
-    $cand = Join-Path $env:TEMP 'claude' $slug $SessionId 'scratchpad'
-    if (Test-Path -LiteralPath $cand) {
-        $files = @(Get-ChildItem -LiteralPath $cand -Recurse -File -ErrorAction SilentlyContinue)
-        [long]$bytes = 0
-        foreach ($f in $files) { $bytes += $f.Length }
-        $scratchpad = [pscustomobject]@{ Path = $cand; Files = $files.Count; Bytes = $bytes }
-    } else {
-        $scratchpad = [pscustomobject]@{ Path = $cand; Files = 0; Bytes = 0; Missing = $true }
-    }
+    [ordered]@{ Repo = $root; Branch = $branch; Default = $default; DirtyFiles = $porcelain.Count; PreExistingDirty = $pre
+        HasUpstream = $hasUp; Ahead = $ahead; NotOnDefault = $unmerged; Stashes = (Invoke-Git $root @('stash', 'list')).Out.Count
+        Worktrees = (Invoke-Git $root @('worktree', 'list')).Out.Count; ViaShell = $false }
 }
 
-$openTodos = @()
-if ($lastTodos -is [System.Collections.IList]) {
-    $openTodos = @($lastTodos | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['status'] -ne 'completed' } |
-        ForEach-Object { [pscustomobject]@{ Status = $_['status']; Content = $_['content'] } })
+$selfRepo = Repo-Root $PSScriptRoot
+
+# ---------- group edits by git repo ----------
+$byRepo = [ordered]@{}
+foreach ($p in $edits.Keys) {
+    $key = (Repo-Root $p) ?? '(not in a git repo)'
+    if (-not $byRepo.Contains($key)) { $byRepo[$key] = [Collections.Generic.List[object]]::new() }
+    $e = $edits[$p]
+    $tools = [string[]]@($e.tools); [Array]::Sort($tools, [StringComparer]::Ordinal)
+    $byRepo[$key].Add([ordered]@{ Path = $p; Edits = $e.count; Tools = ($tools -join '+'); Sidechain = $e.sidechain; Exists = (Test-Path -LiteralPath $p) })
+}
+$repos = [Collections.Generic.List[string]]::new()
+foreach ($k in $byRepo.Keys) { if ($k -ne '(not in a git repo)') { $repos.Add($k) } }
+$states = [Collections.Generic.List[object]]::new()
+foreach ($r in $repos) { $states.Add((Repo-State $r)) }
+
+# ---------- repos touched only through shell commands ----------
+# sed -i / heredoc / git commit never show up as Edit/Write, so a repo changed that way would be skipped by
+# Step 5. Candidates: every cwd, plus paths named (or cd'd into) by flagged shell commands. Kept only if the
+# repo has something to land: dirty, unpushed, or a working branch not yet on its default branch.
+$sortedPaths = [string[]]@($shellPaths); [Array]::Sort($sortedPaths, [StringComparer]::Ordinal)
+foreach ($c in @($cwds) + $sortedPaths) {
+    # Walk up to an existing ancestor: the command may have named a file it created or deleted.
+    try { $p = Full-Path $c } catch { continue }
+    while ($p -and -not (Test-Path -LiteralPath $p)) { $p = [IO.Path]::GetDirectoryName($p) }  # $null past the root
+    if (-not $p -or $p -eq '/') { continue }
+    $root = Repo-Root $p
+    if (-not $root -or $repos.Contains($root) -or $root -eq $selfRepo) { continue }  # running this skill's own scripts isn't touching its repo
+    $st = Repo-State $root
+    if ($st.DirtyFiles -gt 0 -or $st.Ahead -gt 0 -or $st.NotOnDefault -gt 0) { $st.ViaShell = $true; $repos.Add($root); $states.Add($st) }
 }
 
-$idleSec = $null
-if ($lastTs) { $idleSec = [int]((Get-Date).ToUniversalTime() - ([datetime]$lastTs).ToUniversalTime()).TotalSeconds }
+# ---------- session temp dir (/tmp/claude-<uid>/<slug>/<session-id>; %TEMP%\claude\... on Windows) ----------
+$tmpRoot = if ($IsWindows) { Join-Path ($env:TEMP ?? $env:TMP ?? '') 'claude' } else { Join-Path ($env:TMPDIR ? $env:TMPDIR : '/tmp') "claude-$(& id -u)" }
+$tmpHits = @(foreach ($i in $ids) { Get-ChildItem -Path (Join-Path $tmpRoot '*' $i) -Directory -ErrorAction SilentlyContinue | ForEach-Object FullName })
+if ($tmpHits) {
+    $files = @(foreach ($h in $tmpHits) { Get-ChildItem -LiteralPath $h -File -Recurse -Force -ErrorAction SilentlyContinue })
+    [long]$bytes = 0
+    foreach ($f in $files) {  # follow symlinks (task .output files link to transcripts); broken links count 0
+        if (-not $f.LinkTarget) { $bytes += $f.Length; continue }
+        $t = $f.ResolveLinkTarget($true); if ($t -and $t.Exists -and $t -is [IO.FileInfo]) { $bytes += $t.Length }
+    }
+    $tmpdir = [ordered]@{ Path = $tmpHits[0]; Files = $files.Count; Bytes = $bytes; Missing = $false }
+} else {
+    $tmpdir = [ordered]@{ Path = (Join-Path $tmpRoot '<slug>' $SessionId); Files = 0; Bytes = 0; Missing = $true }
+}
+
+$todosWritten = $null -ne $lastTodos -or $tasks.Count -gt 0
+$openTodos = [Collections.Generic.List[object]]::new()
+if ($lastTodos -is [Collections.IList]) {
+    foreach ($t in $lastTodos) { if ($t -is [Collections.IDictionary] -and $t['status'] -ne 'completed') { $openTodos.Add([ordered]@{ Status = $t['status']; Content = $t['content'] }) } }
+}
+foreach ($k in $tasks.Keys) {
+    $t = $tasks[$k]
+    if ($t.Status -notin 'completed', 'deleted') { $openTodos.Add([ordered]@{ Status = $t.Status; Content = $t.Content; Id = $k }) }
+}
+
+$idle = if ($lastTs) { [long][math]::Truncate(([DateTimeOffset]::UtcNow - (Parse-Ts $lastTs)).TotalSeconds) } else { $null }
 
 $result = [ordered]@{
-    SessionId      = $SessionId
-    Transcript     = $transcript.FullName
-    SubagentFiles  = $subagentFiles.Count
-    Started        = $firstTs
-    LastActivity   = $lastTs
-    IdleSeconds    = $idleSec
-    Cwd            = @($cwds)
-    GitBranches    = @($branches)
-    Compactions    = $compactions
-    DroppedTokens  = $droppedTokens
-    UserTurns      = $userTurns
-    AssistantTurns = $assistantTurns
-    ToolCalls      = $toolCalls
-    UnparsedLines  = $badLines
-    ReposTouched   = $repos
-    RepoState      = @($repoState)
-    EditsByRepo    = $byRepo
-    ShellOfInterest = @($shell)
-    Background     = @($background)
-    Agents         = @($agents)
-    Worktrees      = @($worktrees)
-    Handoffs       = @($handoffs)
-    Questions      = @($questions)
-    Skills         = @($skills)
-    Schedulers     = @($schedulers)
-    OpenTodos      = $openTodos
-    Scratchpad     = $scratchpad
-    Warnings       = @($warnings)
+    SessionId = $SessionId; Transcript = $transcript.FullName; SubagentFiles = $subFiles.Count
+    Started = $firstTs; LastActivity = $lastTs; IdleSeconds = $idle
+    Cwd = @($cwds); GitBranches = @($branches); Compactions = $compactions; DroppedTokens = $dropped
+    UserTurns = $userTurns; AssistantTurns = $assistantTurns; ToolCalls = $toolCalls
+    UnparsedLines = $badLines; ReposTouched = @($repos); RepoState = @($states); EditsByRepo = $byRepo
+    ShellOfInterest = @($shell); Background = @($background); Agents = @($agents); Worktrees = @($worktrees)
+    Handoffs = @($handoffs); Questions = @($questions); Skills = @($skills); Schedulers = @($schedulers)
+    OpenTodos = @($openTodos); TodosWritten = $todosWritten; SessionTmp = $tmpdir; Warnings = @($warnings)
 }
-
-if ($Json) { $result | ConvertTo-Json -Depth 8; return }
+if ($Json) { $result | ConvertTo-Json -Depth 20; exit 0 }
 
 # ---------- human report ----------
-function Fmt-Dur([datetime]$a, [datetime]$b) {
-    $d = $b - $a
-    if ($d.TotalHours -ge 1) { return ('{0}h {1}m' -f [int][math]::Floor($d.TotalHours), $d.Minutes) }
-    if ($d.TotalMinutes -ge 1) { return ('{0}m {1}s' -f $d.Minutes, $d.Seconds) }
-    return ('{0}s' -f [int]$d.TotalSeconds)
-}
-function Fmt-Secs([int]$s) {
-    if ($s -ge 3600) { return ('{0}h {1}m' -f [int][math]::Floor($s / 3600), [int](($s % 3600) / 60)) }
-    if ($s -ge 60)   { return ('{0}m {1}s' -f [int][math]::Floor($s / 60), ($s % 60)) }
-    return "${s}s"
+function Fmt-Secs([long]$s) {  # spelled out: "(16s)" got reported as "about 16 minutes" in testing
+    if ($s -ge 3600) { return "$([math]::Floor($s / 3600)) h $([math]::Floor(($s % 3600) / 60)) min" }
+    if ($s -ge 60) { return "$([math]::Floor($s / 60)) min $($s % 60) sec" }
+    return "$s sec"
 }
 function Fmt-Bytes([long]$n) {
-    if ($n -ge 1MB) { return ('{0:N1} MB' -f ($n / 1MB)) }
-    if ($n -ge 1KB) { return ('{0:N1} KB' -f ($n / 1KB)) }
+    if ($n -ge 1MB) { return ($n / 1MB).ToString('0.0', $inv) + ' MB' }
+    if ($n -ge 1KB) { return ($n / 1KB).ToString('0.0', $inv) + ' KB' }
     return "$n bytes"
 }
+function N([long]$n) { $n.ToString('N0', $inv) }
 
 Write-Output "SESSION $SessionId"
 Write-Output "  transcript : $($transcript.FullName)"
-if ($subagentFiles.Count) { Write-Output "  subagents  : $($subagentFiles.Count) transcript(s) included" }
+if ($subFiles.Count) { Write-Output "  subagents  : $($subFiles.Count) transcript(s) included" }
 if ($firstTs -and $lastTs) {
-    $a = ([datetime]$firstTs).ToLocalTime(); $b = ([datetime]$lastTs).ToLocalTime()
-    Write-Output ("  span       : {0:yyyy-MM-dd HH:mm} -> {1:yyyy-MM-dd HH:mm}  ({2}), idle {3}" -f $a, $b, (Fmt-Dur $a $b), (Fmt-Secs $idleSec))
+    $s = (Parse-Ts $firstTs).ToLocalTime(); $e = (Parse-Ts $lastTs).ToLocalTime()
+    Write-Output ('  span       : {0} -> {1}  ({2}), idle {3}' -f $s.ToString('yyyy-MM-dd HH:mm', $inv), $e.ToString('yyyy-MM-dd HH:mm', $inv),
+        (Fmt-Secs ([long][math]::Truncate(($e - $s).TotalSeconds))), (Fmt-Secs $idle))
 }
-$compLine = "  turns      : {0:N0} user / {1:N0} assistant, {2:N0} tool calls, {3} compaction(s)" -f $userTurns, $assistantTurns, $toolCalls, $compactions
-if ($compactions -gt 0 -and $droppedTokens -gt 0) { $compLine += (", ~{0:N0} tokens dropped (recall unreliable)" -f $droppedTokens) }
-Write-Output $compLine
+$line = "  turns      : $(N $userTurns) user / $(N $assistantTurns) assistant, $(N $toolCalls) tool calls, $compactions compaction(s)"
+if ($compactions -and $dropped) { $line += ", ~$(N $dropped) tokens dropped (recall unreliable)" }
+Write-Output $line
 Write-Output "  cwd        : $($cwds -join '; ')"
 if ($branches.Count) { Write-Output "  branches   : $($branches -join '; ')" }
 if ($badLines) { Write-Output "  unparsed   : $badLines line(s) skipped" }
 foreach ($w in $warnings) { Write-Output "  WARNING    : $w" }
 
-Write-Output ""
-Write-Output ("FILES EDITED (Edit/Write/NotebookEdit): {0}" -f $edits.Count)
-if ($edits.Count -eq 0) { Write-Output "  none" }
+Write-Output "`nFILES EDITED (Edit/Write/NotebookEdit): $($edits.Count)"
+if (-not $edits.Count) { Write-Output '  none' }
 foreach ($k in $byRepo.Keys) {
     Write-Output "  [$k]"
-    foreach ($f in ($byRepo[$k] | Sort-Object Path)) {
-        $tags = @()
-        if ($f.Sidechain) { $tags += 'subagent' }
-        if (-not $f.Exists) { $tags += 'MISSING NOW' }
-        $tagStr = if ($tags.Count) { '  <' + ($tags -join ', ') + '>' } else { '' }
-        Write-Output ("    {0}  ({1}x {2}){3}" -f $f.Path, $f.Edits, $f.Tools, $tagStr)
+    $items = [object[]]$byRepo[$k].ToArray()
+    [Array]::Sort($items, [Comparison[object]] { param($x, $y) [string]::CompareOrdinal($x.Path, $y.Path) })
+    foreach ($it in $items) {
+        $tags = @(if ($it.Sidechain) { 'subagent' }) + @(if (-not $it.Exists) { 'MISSING NOW' })
+        $tag = if ($tags) { "  <$($tags -join ', ')>" } else { '' }
+        Write-Output "    $($it.Path)  ($($it.Edits)x $($it.Tools))$tag"
     }
 }
 
-Write-Output ""
-Write-Output ("REPOS TOUCHED: {0}" -f $repos.Count)
-if ($repos.Count -eq 0) { Write-Output "  none" }
-foreach ($s in $repoState) {
+Write-Output "`nREPOS TOUCHED: $($repos.Count)"
+if (-not $repos.Count) { Write-Output '  none' }
+foreach ($s in $states) {
     $up = if ($s.HasUpstream) { "ahead $($s.Ahead)" } else { 'no upstream' }
-    $extra = @()
-    if ($s.Stashes -gt 0)   { $extra += "$($s.Stashes) stash" }
-    if ($s.Worktrees -gt 1) { $extra += "$($s.Worktrees) worktrees" }
-    $extraStr = if ($extra.Count) { ' · ' + ($extra -join ', ') } else { '' }
-    Write-Output ("  {0}" -f $s.Repo)
-    Write-Output ("      on {0} (default {1}) · dirty {2} · {3}{4}" -f $s.Branch, ($s.Default ?? 'none'), $s.DirtyFiles, $up, $extraStr)
+    $extra = @(if ($s.Stashes) { "$($s.Stashes) stash" }) + @(if ($s.Worktrees -gt 1) { "$($s.Worktrees) worktrees" })
+    $via = if ($s.ViaShell) { '  <via shell - files not in FILES EDITED, use git status>' } else { '' }
+    Write-Output "  $($s.Repo)$via"
+    $pre = if ($s.PreExistingDirty) { " ($($s.PreExistingDirty) untouched since session start = user's own)" } else { '' }
+    $nod = if ($s.NotOnDefault) { " · $($s.NotOnDefault) commit(s) not on $($s.Default)" } else { '' }
+    Write-Output ("      on $($s.Branch) (default $($s.Default ?? 'unknown')) · dirty $($s.DirtyFiles)$pre · $up$nod" + $(if ($extra) { ' · ' + ($extra -join ', ') } else { '' }))
 }
 
-Write-Output ""
-Write-Output ("SHELL COMMANDS THAT WROTE / CHANGED GIT / LAUNCHED PROCESSES: {0}" -f $shell.Count)
-if ($shell.Count -eq 0) { Write-Output "  none" }
-foreach ($s in $shell) {
-    $sc = if ($s.Sidechain) { ' (subagent)' } else { '' }
-    Write-Output ("  [{0}]{1} {2}" -f $s.Flags, $sc, $s.Command)
+Write-Output "`nSHELL COMMANDS THAT WROTE / CHANGED GIT / LAUNCHED PROCESSES: $($shell.Count)"
+foreach ($s in $shell) { Write-Output "  [$($s.Flags)]$(if ($s.Sidechain) { ' (subagent)' }) $($s.Command)" }
+if (-not $shell.Count) { Write-Output '  none' }
+
+function Section([string]$title, $items, [scriptblock]$fmt) {
+    Write-Output "`n${title}: $(@($items).Count)"
+    foreach ($it in $items) { Write-Output ('  ' + (& $fmt $it)) }
+    if (-not @($items).Count) { Write-Output '  none' }
 }
+Section 'BACKGROUND COMMANDS (run_in_background)' $background { param($b) $b.Command }
+Section 'SUBAGENTS LAUNCHED' $agents { param($x) "$(if ($x.Type) { $x.Type } else { 'general-purpose' }): $($x.Description)" + $(if ($x.Isolation) { " [isolation: $($x.Isolation)]" } else { '' }) }
+Section 'WORKTREES ENTERED (EnterWorktree / Agent isolation:worktree)' $worktrees { param($w) "$($w.Tool): $($w.Detail)" }
+Section 'FILES HANDED TO USER (SendUserFile)' $handoffs { param($h) $h.Path }
+Section 'QUESTIONS ASKED (AskUserQuestion)' $questions { param($q) $q.Headers }
+Section 'SKILLS INVOKED' $skills { param($s) $s.Name + $(if ($s.Args) { " $($s.Args)" } else { '' }) }
+Section 'SCHEDULERS / WATCHES (CronCreate, ScheduleWakeup, Monitor, RemoteTrigger)' $schedulers { param($s) "$($s.Tool): $($s.Detail)" }
 
-Write-Output ""
-Write-Output ("BACKGROUND COMMANDS (run_in_background): {0}" -f $background.Count)
-foreach ($b in $background) { Write-Output "  $($b.Command)" }
-if ($background.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-Write-Output ("SUBAGENTS LAUNCHED: {0}" -f $agents.Count)
-foreach ($a in $agents) {
-    $iso = if ($a.Isolation) { " [isolation: $($a.Isolation)]" } else { '' }
-    Write-Output ("  {0}: {1}{2}" -f ($a.Type ?? 'general-purpose'), $a.Description, $iso)
-}
-if ($agents.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-Write-Output ("WORKTREES ENTERED (EnterWorktree / Agent isolation:worktree): {0}" -f $worktrees.Count)
-foreach ($w in $worktrees) { Write-Output ("  {0}: {1}" -f $w.Tool, $w.Detail) }
-if ($worktrees.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-Write-Output ("FILES HANDED TO USER (SendUserFile): {0}" -f $handoffs.Count)
-foreach ($h in $handoffs) { Write-Output "  $($h.Path)" }
-if ($handoffs.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-Write-Output ("QUESTIONS ASKED (AskUserQuestion): {0}" -f $questions.Count)
-foreach ($q in $questions) { Write-Output "  $($q.Headers)" }
-if ($questions.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-Write-Output ("SKILLS INVOKED: {0}" -f $skills.Count)
-foreach ($s in $skills) { $ar = if ($s.Args) { " $($s.Args)" } else { '' }; Write-Output ("  {0}{1}" -f $s.Name, $ar) }
-if ($skills.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-Write-Output ("SCHEDULERS / WATCHES (CronCreate, ScheduleWakeup, Monitor, RemoteTrigger): {0}" -f $schedulers.Count)
-foreach ($s in $schedulers) { Write-Output ("  {0}: {1}" -f $s.Tool, $s.Detail) }
-if ($schedulers.Count -eq 0) { Write-Output "  none" }
-
-Write-Output ""
-if ($null -eq $lastTodos) {
-    Write-Output "TODO LIST: never written this session"
+Write-Output ''
+if (-not $todosWritten) {
+    Write-Output 'TODO LIST: never written this session'
 } else {
-    Write-Output ("TODO LIST: {0} open of {1}" -f $openTodos.Count, @($lastTodos).Count)
-    foreach ($t in $openTodos) { Write-Output ("  [{0}] {1}" -f $t.Status, $t.Content) }
+    $total = $(if ($lastTodos -is [Collections.IList]) { $lastTodos.Count } else { 0 }) + $tasks.Count
+    Write-Output "TODO LIST: $($openTodos.Count) open of $total"
+    foreach ($t in $openTodos) { Write-Output "  [$($t.Status)] $($t.Content)" }
 }
 
-Write-Output ""
-if ($scratchpad) {
-    if ($scratchpad.PSObject.Properties['Missing']) {
-        Write-Output "SCRATCHPAD: $($scratchpad.Path) (does not exist)"
-    } else {
-        Write-Output ("SCRATCHPAD: {0}  ({1} file(s), {2})" -f $scratchpad.Path, $scratchpad.Files, (Fmt-Bytes $scratchpad.Bytes))
-    }
-}
+Write-Output ''
+if ($tmpdir.Missing) { Write-Output "SESSION TMP: $($tmpdir.Path) (does not exist)" }
+else { Write-Output "SESSION TMP: $($tmpdir.Path)  ($($tmpdir.Files) file(s), $(Fmt-Bytes $tmpdir.Bytes))" }
