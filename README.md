@@ -2,8 +2,8 @@
 
 Agent skills by FloyyMP. Install with [skills.sh](https://skills.sh):
 
-```powershell
-npx skills add FloyyMP/claude-skills --agent claude-code -g -y
+```bash
+npx skills add FloyyMP/claude-skills --agent claude-code -g -y --skill '*'
 ```
 
 | Skill | What it does |
