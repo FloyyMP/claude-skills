@@ -1,6 +1,6 @@
 ---
 name: complete-session
-version: 1.0.1
+version: 1.1.0
 description: Closes out a Claude Code session so the window can be shut with nothing lost — verifies edited files, lands and pushes every touched repo, updates CLAUDE.md and memory, then proves the state is clean with command output. Use when the user runs /complete-session or says "complete session", "wrap up", "done for today", "close out". Not for wrapping up a single task mid-session.
 license: MIT
 ---
@@ -38,6 +38,8 @@ Run the parser via the **Bash tool**. The session id defaults to `$CLAUDE_CODE_S
 ```
 ~/.claude/skills/complete-session/scripts/session-facts.py [--session-id <id>] [--json]
 ```
+
+**Windows (no bash):** every script has a `.ps1` twin — run `pwsh -NoProfile -Command "& '<path>\<script>.ps1' <flags>"` (not `-File`, which passes `-Repo a,b` as one string) with PowerShell flags: `-SessionId`, `-Json`, `-Repo` (comma-separated list for prove-clean), `-TimeoutSec`, `-MemoryDir`, `-Stats`. Two gaps: `memory-index-check.ps1` doesn't auto-detect the memory dir, so always pass `-MemoryDir`; `prove-clean.ps1` has no `SINCE` filter, so it counts every stash and branch — mark ones that predate the session as the user's, not open items.
 
 It reads the session transcript (plus subagent transcripts) and prints: files edited grouped by git repo, repos touched **with a live git-state snapshot**, shell commands that wrote files / changed git state / launched processes, background jobs, subagents, worktrees entered, files handed to the user, questions asked, skills invoked, schedulers, the last todo list, compaction count and tokens dropped, idle time, and the session temp dir. **These facts drive Steps 1, 2, 5 and 7** — repos come from *files touched*, never from cwd. Repos changed only through shell commands are added when dirty or ahead and tagged `<via shell>`; take their paths from `git status` in 0c. For the machine parts of Steps 5 and 7, iterate `--json` output (`ReposTouched`, `RepoState`) rather than eyeballing the human report.
 
