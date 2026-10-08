@@ -300,14 +300,15 @@ memory                         —                                         N add
 
 Then **machine-checked vs untested:** one line each — what the gates covered, and what only a human can confirm (a UI flow, a prod path, a credentialed call).
 
-End with one of:
+**Suggestions the user never answered and things you noticed in passing are not open items** — list them *above* the verdict under "Offered, not done" (one line each), so they neither block "clean" nor get applied. Anything else that belongs above the verdict (machine-checked-vs-untested, the "recalled" note) goes there too.
+
+**The verdict is the literal last line of the reply — nothing after it.** Summary, table, recap and "Offered, not done" all go above it. End with one of:
 - **Session is clean.** — every row ✓. The normal ending.
-- **Session has open items:** — followed by a numbered list, one per line, each naming the blocker.
+- **Session has open items:** — followed by a numbered list, one per line, each naming the blocker. (This is the one case the verdict leads a block that follows; the list is part of the verdict, so it is still the last thing in the reply.)
   - **Acceptable blockers:** user deferred it (any wording); needs live credentials/production; a decision only the user can make and you already asked; a push rejected / gate-declined / failed on auth — committed locally, say so; a gate that fails on this session's changes — committed locally, not pushed; staged secrets awaiting a decision; `ff-only` refused because default moved; pre-existing user WIP left uncommitted on purpose.
   - **Not acceptable:** "didn't have time to verify", or any row you simply didn't run.
-  - Suggestions the user never answered and things you noticed in passing are **not** open items: list them after the ending under "Offered, not done" (one line each), so they neither block "clean" nor get applied.
 
-If Step 0a's script failed and you ran on recall, say so here: the table is then "recalled", not "proved".
+If Step 0a's script failed and you ran on recall, say so above the verdict: the table is then "recalled", not "proved".
 
 ---
 
