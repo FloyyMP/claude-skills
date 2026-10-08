@@ -1,6 +1,6 @@
 ---
 name: audit-setup
-version: 1.0.0
+version: 1.1.0
 description: Fully analyse a Claude Code setup — plugins, skills, MCP servers, subagents, slash commands, hooks, settings, CLAUDE.md, permissions. Use when the user asks to audit, review, analyse or clean up their Claude Code setup/config.
 ---
 
@@ -29,16 +29,7 @@ For each skill/agent/command, read the frontmatter (name, description, tools, mo
 
 ## 2. Analyse
 
-Check for:
-
-- **Duplicates / overlap** — skills, commands or agents that do the same thing; same MCP server in several scopes.
-- **Conflicts** — contradictions between CLAUDE.md files, or between allow and deny rules.
-- **Weak descriptions** — vague skill/agent descriptions that won't trigger reliably, or are so broad they trigger constantly.
-- **Context bloat** — huge CLAUDE.md, many MCP servers (each adds tool definitions), long skill descriptions.
-- **Broken things** — MCP commands that don't exist, hooks pointing at missing scripts, enabled plugins that aren't installed, invalid JSON, skills missing frontmatter.
-- **Security** — secrets/tokens in settings or `.mcp.json`, over-broad permissions (`Bash(*)`, bypass mode, wide `additionalDirectories`), hooks running unreviewed commands, untrusted MCP servers.
-- **Unused / stale** — disabled-but-installed plugins, empty folders, leftover experiments.
-- **Gaps** — only if clearly useful (e.g. no deny rules for `.env`, no CLAUDE.md in an active project).
+Read `references/checks.md` and run every check in it against what you collected.
 
 ## 3. Report
 
