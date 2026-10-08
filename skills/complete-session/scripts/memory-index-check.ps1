@@ -23,12 +23,14 @@ if (-not (Test-Path -LiteralPath $indexPath)) { Write-Output "MEMORY.md missing 
 
 $files = @(Get-ChildItem -LiteralPath $MemoryDir -Filter '*.md' -File | Where-Object Name -ne 'MEMORY.md')
 $indexLines = @(Get-Content -LiteralPath $indexPath)
+# Any .md link on a line indexes its file, but only the first link per line is that line's
+# entry, so "indexed twice" counts entries, not cross-refs.
 $linked = [ordered]@{}
+$entries = @{}
 foreach ($l in $indexLines) {
-    foreach ($m in [regex]::Matches($l, '\]\(([^)]+\.md)\)')) {
-        $target = $m.Groups[1].Value
-        if ($linked.Contains($target)) { $linked[$target]++ } else { $linked[$target] = 1 }
-    }
+    $ms = [regex]::Matches($l, '\]\(([^)]+\.md)\)')
+    foreach ($m in $ms) { $linked[$m.Groups[1].Value] = $true }
+    if ($ms.Count -gt 0) { $e = $ms[0].Groups[1].Value; $entries[$e] = 1 + ($entries[$e] ?? 0) }
 }
 
 $baseNames = @($files | ForEach-Object BaseName)
@@ -48,7 +50,9 @@ foreach ($f in $files) {
 }
 foreach ($t in $linked.Keys) {
     if (-not (Test-Path -LiteralPath (Join-Path $MemoryDir $t))) { $findings.Add("dangling link : $t") }
-    if ($linked[$t] -gt 1) { $findings.Add("indexed twice : $t") }
+}
+foreach ($t in $entries.Keys) {
+    if ($entries[$t] -gt 1) { $findings.Add("indexed twice : $t") }
 }
 
 # ---------- inline [[wikilink]] resolution (informational) ----------
@@ -62,7 +66,7 @@ foreach ($f in $files) {
     }
 }
 
-Write-Output ("memory files: {0:N0}   index lines with links: {1:N0}   findings: {2}   dead wikilinks: {3}" -f $files.Count, $linked.Count, $findings.Count, $deadWiki.Count)
+Write-Output ("memory files: {0:N0}   indexed files: {1:N0}   findings: {2}   dead wikilinks: {3}" -f $files.Count, $linked.Count, $findings.Count, $deadWiki.Count)
 foreach ($x in $findings) { Write-Output "  $x" }
 if ($deadWiki.Count -gt 0) {
     Write-Output "  dead [[wikilink]] targets (forward refs are allowed; listed for awareness):"

@@ -9,6 +9,7 @@ Usage: memory-index-check.py [--memory-dir DIR] [--stats]
                 (~/.claude/projects/<root-slug>/memory; session found via $CLAUDE_CODE_SESSION_ID),
                 else for the current directory's git root. No memory files at all = pass.
   --stats       also print memory count by type and orphan memories (nothing links to them).
+Archive folders (see ARCHIVE_DIRS) are skipped; their file count is printed.
 """
 import argparse
 import glob
@@ -18,6 +19,7 @@ import subprocess
 import sys
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
+ARCHIVE_DIRS = {"archive", "archived", "unused", "deprecated"}
 
 
 def session_cwd():
@@ -58,21 +60,27 @@ def main():
         print(f"MEMORY.md missing at {os.path.join(mem, 'MEMORY.md')}")
         sys.exit(1)
 
-    all_md = sorted(glob.glob(os.path.join(glob.escape(mem), "**", "*.md"), recursive=True))
+    rel = lambda p: os.path.relpath(p, mem)
+    archived = lambda p: any(d.lower() in ARCHIVE_DIRS for d in rel(p).split(os.sep)[:-1])
+    found = sorted(glob.glob(os.path.join(glob.escape(mem), "**", "*.md"), recursive=True))
+    all_md = [f for f in found if not archived(f)]
+    skipped = len(found) - len(all_md)
     files = [f for f in all_md if os.path.basename(f) != "MEMORY.md"]
     indexes = [f for f in all_md if os.path.basename(f) == "MEMORY.md"]
-    rel = lambda p: os.path.relpath(p, mem)
 
     # Links from ALL MEMORY.md files (root + subfolders), resolved relative to the index containing them.
-    linked = {}
+    # Any .md link on a line indexes its file (grouped lines like "VPN: [a](a.md); [b](b.md)" are fine), but only
+    # the first link per line is that line's entry, so "indexed twice" counts entries, not cross-refs.
+    linked, entries = set(), {}
     for idx in indexes:
         with open(idx, encoding="utf-8-sig", errors="replace") as fh:
             text = re.sub(r"<!--.*?-->|^```.*?^```", "", fh.read(), flags=re.S | re.M)
-        for line in text.splitlines():  # first .md link per line = the index entry; later ones are cross-refs
-            m = re.search(r"\]\(<?(?![a-z][a-z0-9+.-]*:)([^)>#\s]+\.md)(?:#[^)>\s]*)?>?(?:\s+\"[^\"]*\")?\)", line)
-            if m:
-                r = rel(os.path.normpath(os.path.join(os.path.dirname(idx), m.group(1))))
-                linked[r] = linked.get(r, 0) + 1
+        for line in text.splitlines():
+            ms = re.findall(r"\]\(<?(?![a-z][a-z0-9+.-]*:)([^)>#\s]+\.md)(?:#[^)>\s]*)?>?(?:\s+\"[^\"]*\")?\)", line)
+            rs = [rel(os.path.normpath(os.path.join(os.path.dirname(idx), t))) for t in ms]
+            linked.update(rs)
+            if rs:
+                entries[rs[0]] = entries.get(rs[0], 0) + 1
 
     base_names = {os.path.splitext(os.path.basename(f))[0] for f in files}
     findings, dead_wiki, inbound, type_count = [], [], {}, {}
@@ -112,14 +120,17 @@ def main():
             findings.append(f"bad/missing type: {name}")
         else:
             type_count[ty] = type_count.get(ty, 0) + 1
-    for r, n in linked.items():
+    for r in sorted(linked):
         if not os.path.exists(os.path.join(mem, r)):
             findings.append(f"dangling link : {r}")
+    for r, n in entries.items():
         if n > 1:
             findings.append(f"indexed twice : {r}")
 
     print(f"memory dir: {mem}")
-    print(f"memory files: {len(files)}   index lines with links: {len(linked)}   findings: {len(findings)}   dead wikilinks: {len(dead_wiki)}")
+    print(f"memory files: {len(files)}   indexed files: {len(linked)}   findings: {len(findings)}   dead wikilinks: {len(dead_wiki)}")
+    if skipped:
+        print(f"archived (skipped): {skipped} files in {', '.join(sorted(ARCHIVE_DIRS))} folders")
     for x in findings:
         print(f"  {x}")
     if dead_wiki:

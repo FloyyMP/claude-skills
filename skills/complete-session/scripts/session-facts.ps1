@@ -221,19 +221,28 @@ foreach ($p in $edits.Keys) {
 $repos = @($byRepo.Keys | Where-Object { $_ -ne '(not in a git repo)' })
 
 # ---------- live git state per touched repo ----------
+# First output line of a git command, or $null on a non-zero exit. Collect the output before
+# trimming it: piping a native command into Select-Object -First stops the pipeline early and
+# leaves $LASTEXITCODE holding the previous command's code.
+function Get-GitLine([string]$root) {
+    $out = @(& git -C $root @args 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $out | Select-Object -First 1
+}
+
 function Get-RepoState([string]$root) {
-    $branch = (& git -C $root symbolic-ref --short HEAD 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0) { $branch = '(detached/unborn)' }
+    $branch = Get-GitLine $root symbolic-ref --short HEAD
+    if (-not $branch) { $branch = '(detached/unborn)' }
     $dirty = @(& git -C $root status --porcelain 2>$null)
-    $up = (& git -C $root rev-parse --abbrev-ref '@{u}' 2>$null | Select-Object -First 1)
-    $hasUp = ($LASTEXITCODE -eq 0 -and $up)
+    $up = Get-GitLine $root rev-parse --abbrev-ref '@{u}'
+    $hasUp = [bool]$up
     $ahead = 0
     if ($hasUp) {
-        $c = (& git -C $root rev-list --count '@{u}..HEAD' 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -eq 0 -and $c) { $ahead = [int]$c }
+        $c = Get-GitLine $root rev-list --count '@{u}..HEAD'
+        if ($c) { $ahead = [int]$c }
     }
-    $def = (& git -C $root symbolic-ref --short refs/remotes/origin/HEAD 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -eq 0 -and $def) { $def = $def -replace '^origin/', '' } else { $def = $null }
+    $def = Get-GitLine $root symbolic-ref --short refs/remotes/origin/HEAD
+    if ($def) { $def = $def -replace '^origin/', '' }
     $stashes = @(& git -C $root stash list 2>$null).Count
     $wt = @(& git -C $root worktree list 2>$null).Count
     [pscustomobject]@{

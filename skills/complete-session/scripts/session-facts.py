@@ -198,14 +198,14 @@ class Facts:
             # cd / -C targets from EVERY command: `cd ../lib && ./fmt.sh` writes without any write-looking token.
             # Inclusion below still needs dirty/unpushed state, and PreExistingDirty separates the user's own WIP.
             for m in CD_RX.finditer(cmd):
-                p = re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", HOME, next(g for g in m.groups() if g))
+                p = re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", lambda _: HOME, next(g for g in m.groups() if g))
                 if cwd and not os.path.isabs(p):
                     p = os.path.normpath(os.path.join(cwd, p))
                 if os.path.isabs(p):
                     self.shell_paths.add(p)
             if flags:
                 for m in PATH_RX.finditer(cmd):
-                    p = re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", HOME, m.group(0))
+                    p = re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", lambda _: HOME, m.group(0))
                     self.shell_paths.add(p)
                 rec = {"Time": ts, "Tool": name, "Flags": ",".join(flags), "Sidechain": sidechain,
                        "Command": trunc(" ".join(cmd.split()), 180)}
@@ -396,8 +396,11 @@ def main():
             repos.append(root)
             states.append(st)
 
-    # ---------- session temp dir (/tmp/claude-<uid>/<slug>/<session-id>) ----------
-    tmp_root = os.path.join(os.environ.get("TMPDIR") or "/tmp", f"claude-{os.getuid()}")
+    # ---------- session temp dir (/tmp/claude-<uid>/<slug>/<session-id>; %TEMP%\claude\... on Windows) ----------
+    if hasattr(os, "getuid"):
+        tmp_root = os.path.join(os.environ.get("TMPDIR") or "/tmp", f"claude-{os.getuid()}")
+    else:
+        tmp_root = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or "", "claude")
     tmp_hits = [h for i in ids for h in glob.glob(os.path.join(tmp_root, "*", i))]
     if tmp_hits:
         files = [os.path.join(dp, n) for h in tmp_hits for dp, _, ns in os.walk(h) for n in ns]
