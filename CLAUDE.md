@@ -17,7 +17,7 @@ Each machine has one clone of this repo. `~/.claude/skills/<name>/` holds **inst
 1. `git pull` first. Skills are edited from several machines; skipping the pull is how history diverged on 2026-10-08.
 2. Edit the skill here. A new skill starts here too, never directly in `~/.claude/skills/`.
 3. Commit and push to `main` straight away.
-4. Reinstall: `npx skills add FloyyMP/claude-skills --agent claude-code -g -y --skill '*'`
+4. Reinstall: `npx skills add FloyyMP/claude-skills --agent claude-code -g -y --skill '*'` (`/sync-skills` runs steps 1, 3 and 4).
 5. When adding a skill, add a row to the README table and the name to the GitHub repo description.
 
 ## skills.sh listing
