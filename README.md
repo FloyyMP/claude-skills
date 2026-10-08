@@ -3,7 +3,7 @@
 Agent skills by FloyyMP. Install with [skills.sh](https://skills.sh):
 
 ```powershell
-npx skills add FloyyMP/skills --agent claude-code -g -y
+npx skills add FloyyMP/claude-skills --agent claude-code -g -y
 ```
 
 | Skill | What it does |
