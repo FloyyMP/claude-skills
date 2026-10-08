@@ -1,4 +1,4 @@
-# skills
+# claude-skills
 
 Agent skills by FloyyMP. Install with [skills.sh](https://skills.sh):
 
