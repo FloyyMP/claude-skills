@@ -77,8 +77,6 @@ foreach ($r in $Repo) {
     if ((G $r @('rev-parse', '--abbrev-ref', '@{u}')).Ok) {
         $ahead = [int](First (G $r @('rev-list', '--count', '@{u}..HEAD')))
         Row 'nothing unpushed' ($ahead -eq 0) "git rev-list --count @{u}..  ($ahead ahead)"
-        $landed = (First (G $r @('rev-parse', 'HEAD'))) -eq (First (G $r @('rev-parse', '@{u}')))
-        Row 'push landed (sha match)' $landed 'git rev-parse HEAD vs @{u}'
     } elseif ((G $r @('remote')).Out.Count -and (G $r @('rev-parse', '-q', '--verify', 'HEAD')).Ok) { # remote but no/gone upstream
         $c = G $r @('rev-list', '--count', 'HEAD', '--not', '--remotes')
         $ahead = $c.Ok ? [int]$c.Out[0] : -1
