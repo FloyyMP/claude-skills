@@ -80,7 +80,7 @@ If the user invoked this skill implicitly (for example, “that’s it”), ask 
 Run the bundled read-only checker for every touched repository, passing the session start time so pre-existing stashes and branches don't count:
 
 ```powershell
-$since = [DateTimeOffset]'<session-start from Step 1>'.ToUnixTimeSeconds()
+$since = ([DateTimeOffset]'<session-start from Step 1>').ToUnixTimeSeconds()
 pwsh -NoProfile -File <skill-dir>\scripts\prove-clean.ps1 -Repo <repo1>,<repo2> -Since $since
 ```
 
