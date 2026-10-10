@@ -1,6 +1,6 @@
 ---
 name: complete-session
-version: 2.0.0
+version: 2.0.1
 description: Closes out a Claude Code session so the window can be shut with nothing lost — verifies edited files, lands and pushes every touched repo, updates CLAUDE.md and memory, then proves the state is clean with command output. Use when the user runs /complete-session or says "complete session", "wrap up", "done for today", "close out". Not for wrapping up a single task mid-session.
 license: MIT
 ---
@@ -127,7 +127,7 @@ Evidence line: `candidates: N — kept: N, rejected: N (reasons)`. Pure Q&A or a
 Evidence line: `outside-repo edits: N (memory N · global-config N · installed-skill N · other N) · external effects: N`. Driven by `OutsideRepoEdits` + `ExternalEffects`.
 
 - **`installed-skill`** — `~/.claude/skills/<name>/` is overwritten by the next `npx skills add`. Port the edit to the source clone (claude-skills), which then lands in Step 5 with its post-change steps (Precedence) including the reinstall.
-- **`global-config`** — if a mirror exists (memory or the file says so, e.g. `~/AGENTS.md` mirrors `~/.claude/CLAUDE.md`), apply the same change there.
+- **`global-config`** — if a mirror exists (memory or the file says so), apply the same change there.
 - **`install` / `plugin` / `mcp` / `skill` / `github` / `schedule` / `registry` / `env`** — list under "Environment changes" in Step 7, one line each. If it must be repeated on the user's other machines (laptop, VPS), say so.
 - **`memory`** — feeds Step 6's `already saved this session` count.
 
@@ -201,7 +201,7 @@ python <S>/memory-index-check.py [--memory-dir <dir>]
 ```
 Evidence line: `candidates: N — saved: N, updated: N, archived: N, rejected: N · already saved this session: N` (the last from `OutsideRepoEdits` kind `memory` — don't re-save after a compaction).
 
-**What to save:** new preferences/feedback, project decisions, corrections to stale entries, new external references. **Same bar as Step 3**, default skew omit. Read the global `~/.claude/CLAUDE.md` and `~/AGENTS.md` first: covered there → don't save, and archive any memory copy.
+**What to save:** new preferences/feedback, project decisions, corrections to stale entries, new external references. **Same bar as Step 3**, default skew omit. Read the global `~/.claude/CLAUDE.md` first: covered there → don't save, and archive any memory copy.
 
 **Calibration — these LOOK worth saving but FAIL:**
 - "Fixed the login redirect this session" → narrative; the commit records it.

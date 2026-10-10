@@ -1,12 +1,10 @@
 ---
 name: find-tooling
-version: 1.0.2
+version: 1.0.3
 description: Find and install the best plugins, MCP servers, skills and CLI tools for the current project or task. Use when starting work on a project, when a task would benefit from tooling not yet installed, or when asked to find plugins/skills/tools. Installs directly; for a rated recommendations report without installing, use automation-advisor.
 ---
 
 # find-tooling
-
-Steps 2, 5 and 7 are Claude Code only. Under Codex use only steps 3 and 4, with `--agent codex`.
 
 Skill dir (default): `C:\Users\Alfie\.claude\skills\find-tooling\`. On other machines it is `~/.claude/skills/find-tooling/`.
 
