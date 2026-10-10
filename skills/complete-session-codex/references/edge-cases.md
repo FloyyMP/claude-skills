@@ -1,26 +1,23 @@
-# Edge Cases — unusual repo states at close-out
+# Edge Cases — unusual repo states at close-out (Codex)
 
-Read this only when Step 5's reads detect one of the states below. Each has a specific safe path; none should be improvised.
+Read this only when Step 6's checks detect one of the states below. Each has a specific safe path; none should be improvised.
 
 ## Unborn HEAD (fresh `git init`, no commits yet)
 
-`git log` and `@{u}` error — that's expected, not a failure. Skip those reads, stage your paths (5b–5c), and make the first commit (5d). If a remote is configured, push it with `git push -u <remote> <branch>` (5e); with no remote there's nothing to push.
+`git log` and `@{u}` error — expected, not a failure. Skip those reads, stage your paths (6b–6c), make the first commit (6d). With a remote, push with `git push -u origin <branch>` (6e). With no remote, check Precedence first: a global rule such as "every `git init` is followed by `gh repo create` + push" means create the remote and push now; otherwise there's nothing to push.
 
 ## Detached HEAD
 
-If `git symbolic-ref -q HEAD` shows no branch, a commit here gets orphaned on push. Don't create a branch (the user never wants one): stop and surface it to the user.
+`git symbolic-ref -q HEAD` prints nothing: a commit here is orphaned on push. Don't create a branch: stop and surface it to the user.
 
 ## In-progress merge / rebase
 
-If `git status` shows an unfinished merge/rebase (or `git rev-parse --git-path MERGE_HEAD` / `rebase-merge` / `rebase-apply` resolves to an existing path), the repo is mid-operation. **Do not auto-commit** — that bakes a half-resolved state. Surface it, summarise the conflict, hand back. This is a "Session has open items" outcome.
+`git status` shows an unfinished merge/rebase (or `git rev-parse --git-path MERGE_HEAD` / `rebase-merge` / `rebase-apply` exists). **Do not commit** — that bakes in a half-resolved state. Summarise the conflict and hand back. Skip 6f for this repo. This is a "Session has open items" outcome.
 
-## Harness worktree (`EnterWorktree` / `Agent isolation:worktree`)
+## Linked worktree
 
-If the facts show a worktree was entered, the session did its work in a linked worktree under `<repo>/.claude/worktrees/<name>` on a branch like `worktree-<name>`, not the main working tree. `git worktree list` shows it even though no `git worktree add` ran. Two things follow:
-
-- **Edits look "MISSING NOW"** in the facts because the worktree dir was already removed on `ExitWorktree` — that is expected, not lost work, *provided* the branch was landed. Confirm the commits reached `DEFAULT_BRANCH` (`git log --oneline` on the main tree), don't try to re-verify files at the vanished worktree path.
-- **A worktree still present at close** (ExitWorktree never ran) is session-created and yours to resolve: land its branch through 5a–5h, then `git worktree remove <path>`. Step 5h treats it exactly like a `git worktree add` you made.
+The session worked in a `git worktree add` checkout, so `git switch <default>` fails (the main tree holds it). Verify `git merge-base --is-ancestor origin/<default> HEAD`, then `git push origin HEAD:<default>`. Tell the user the main tree needs `git pull`. Remove the worktree (`git worktree remove <path>`) only if this session created it, its branch is landed, and you are not running inside it. A worktree that predates the session is listed as a note (prove-clean prints `note`), never removed and never an open item.
 
 ## Submodules
 
-If `.gitmodules` exists and this session changed files inside a submodule: land + push the **submodule** first (run it through 5a–5h), *then* the parent commit bumps the submodule pointer. A parent commit alone leaves the submodule at its old SHA — the change won't reach a fresh clone.
+`.gitmodules` exists and the session changed files inside a submodule: land and push the **submodule** first (6a–6g), *then* commit the parent's pointer bump. A parent commit alone leaves the submodule at its old SHA on a fresh clone.

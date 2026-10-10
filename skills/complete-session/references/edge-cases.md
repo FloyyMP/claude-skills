@@ -4,7 +4,7 @@ Read this only when Step 5's reads detect one of the states below. Each has a sp
 
 ## Unborn HEAD (fresh `git init`, no commits yet)
 
-`git log` and `@{u}` error — that's expected, not a failure. Skip those reads, stage your paths (5b–5c), and make the first commit (5d). If a remote is configured, push it with `git push -u <remote> <branch>` (5e); with no remote there's nothing to push.
+`git log` and `@{u}` error — that's expected, not a failure. Skip those reads, stage your paths (5b–5c), and make the first commit (5d). If a remote is configured, push it with `git push -u <remote> <branch>` (5e). With no remote, check Precedence first: a global rule such as "every `git init` is followed by `gh repo create` + push" means create the remote and push now; otherwise there's nothing to push.
 
 ## Detached HEAD
 
@@ -20,6 +20,7 @@ If the facts show a worktree was entered, the session did its work in a linked w
 
 - **Edits look "MISSING NOW"** in the facts because the worktree dir was already removed on `ExitWorktree` — that is expected, not lost work, *provided* the branch was landed. Confirm the commits reached `DEFAULT_BRANCH` (`git log --oneline` on the main tree), don't try to re-verify files at the vanished worktree path.
 - **A worktree still present at close** (ExitWorktree never ran) is session-created and yours to resolve: land its branch through 5a–5h, then `git worktree remove <path>`. Step 5h treats it exactly like a `git worktree add` you made.
+- **A worktree that predates the session** is the user's: prove-clean prints it as a `note`. List it; don't remove it and don't count it as an open item.
 
 ## Submodules
 
