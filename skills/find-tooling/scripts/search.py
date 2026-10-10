@@ -79,21 +79,27 @@ def sort_key(plugin):
     return (-plugin["direct"], -plugin["hits"], -plugin["weight"], -quality(plugin), tokens)
 
 
-def dedup(plugins):
-    """Keep one entry per lowercase name (highest-priority marketplace), counting the others."""
+def dedup(plugins, keyfn=lambda p: p["name"].lower()):
+    """Keep one entry per key (highest-priority marketplace, then shorter name), counting the others."""
     best = {}
     for p in plugins:
-        key = p["name"].lower()
+        key = keyfn(p)
         cur = best.get(key)
         if cur is None:
-            best[key] = dict(p, copies=0)
+            best[key] = dict(p, copies=p.get("copies", 0))
         else:
-            cur["copies"] += 1
-            if mkt_rank(p["mkt"]) < mkt_rank(cur["mkt"]):
-                best[key] = dict(p, copies=cur["copies"], installed=p["installed"] or cur["installed"])
-            elif p["installed"]:
-                cur["installed"] = True
+            copies = cur["copies"] + p.get("copies", 0) + 1
+            installed = p["installed"] or cur["installed"]
+            if (mkt_rank(p["mkt"]), len(p["name"])) < (mkt_rank(cur["mkt"]), len(cur["name"])):
+                cur = best[key] = dict(p)
+            cur["copies"], cur["installed"] = copies, installed
     return list(best.values())
+
+
+def desc_key(p):
+    # Renamed copies (e.g. python@han vs jutsu-python@han) share a description; short ones are too generic to merge.
+    d = " ".join(p.get("desc", "").lower().split())
+    return d if len(d) >= 40 else ("name", p["name"].lower())
 
 
 def search(plugins, terms):
@@ -103,7 +109,7 @@ def search(plugins, terms):
         hits, direct, weight = score(p, patterns)
         if hits:
             found.append(dict(p, hits=hits, direct=direct, weight=weight))
-    return sorted(dedup(found), key=sort_key)
+    return sorted(dedup(dedup(found), desc_key), key=sort_key)
 
 
 # ---------- indexing of the on-disk marketplaces ----------
@@ -422,6 +428,10 @@ def selftest():
     kept = search(copies, ["prisma"])
     assert len(kept) == 1 and kept[0]["mkt"] == "claude-plugins-official" and kept[0]["copies"] == 3, kept
     assert mkt_rank("claude-community") < mkt_rank("unknown") < mkt_rank("buildwithclaude")
+    long_desc = "Advanced Python skills for type system and async patterns."
+    renamed = search([plug("jutsu-python", "han", desc=long_desc), plug("python", "han", desc=long_desc),
+                      plug("x", desc="prisma python"), plug("y", desc="prisma python")], ["python"])
+    assert sorted((p["name"], p["copies"]) for p in renamed) == [("python", 1), ("x", 0), ("y", 0)], renamed
 
     assert front_field("---\nname: x\ndescription: >\n  folded\n  text\nother: 1\n---\n", "description") == "folded text"
     assert front_field('---\ndescription: "quoted: yes"\n---', "description") == "quoted: yes"

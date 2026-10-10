@@ -1,6 +1,6 @@
 ---
 name: find-tooling
-version: 1.0.0
+version: 1.0.1
 description: Find and install the best plugins, MCP servers, skills and CLI tools for the current project or task. Use when starting work on a project, when a task would benefit from tooling not yet installed, or when asked to find plugins/skills/tools.
 ---
 
