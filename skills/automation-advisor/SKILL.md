@@ -1,7 +1,7 @@
 ---
 name: automation-advisor
-version: 1.0.0
-description: Analyze a codebase and recommend Claude Code automations (MCP servers, skills, plugins, hooks, subagents, CLAUDE.md/config), each rated and verified against live sources. Use when the user asks for automation recommendations, wants to improve or set up Claude Code for a project, asks which Claude Code features/skills/MCPs/plugins/hooks they should use, or wants to optimize their Claude Code workflow.
+version: 1.1.0
+description: Analyze a codebase and produce a rated report of recommended Claude Code automations (MCP servers, skills, plugins, hooks, subagents, CLAUDE.md/config), each verified against live sources; installs nothing until the user picks. Use when the user asks for automation recommendations or a report, asks which Claude Code features/hooks/subagents they should use, or wants to optimize their Claude Code workflow. To find and install plugins/skills/CLI tools directly, use find-tooling instead.
 allowed-tools: Read, Glob, Grep, Bash, WebSearch, WebFetch
 ---
 
@@ -37,6 +37,7 @@ Search broadly. For each important library/service found, run targeted searches.
 
 | Source | Look for |
 |--------|----------|
+| Local marketplace catalogs | Plugins and MCP servers across every added marketplace, ranked with installs/review/token cost: `python -I ~/.claude/skills/find-tooling/scripts/search.py <3-5 terms>` (one call per need; never Read marketplace.json) |
 | `anthropics/claude-plugins-official` | Official plugins and skills |
 | `anthropics/skills` | Official skills |
 | Vendor docs / GitHub | Official MCP servers or skills from the library's own maintainers (best trust) |
