@@ -1,12 +1,12 @@
 ---
 name: find-tooling
-version: 1.0.4
+version: 1.0.5
 description: Find and install the best plugins, MCP servers, skills and CLI tools for the current project or task. Use when starting work on a project, when a task would benefit from tooling not yet installed, or when asked to find plugins/skills/tools. Installs directly; for a rated recommendations report without installing, use automation-advisor.
 ---
 
 # find-tooling
 
-Skill dir (default): `C:\Users\Alfie\.claude\skills\find-tooling\`. On other machines it is `~/.claude/skills/find-tooling/`.
+Skill dir: `~/.claude/skills/find-tooling/` (Windows: `$HOME\.claude\skills\find-tooling\`).
 
 ## 1. Identify needs
 
