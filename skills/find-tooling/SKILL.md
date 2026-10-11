@@ -1,6 +1,6 @@
 ---
 name: find-tooling
-version: 1.0.3
+version: 1.0.4
 description: Find and install the best plugins, MCP servers, skills and CLI tools for the current project or task. Use when starting work on a project, when a task would benefit from tooling not yet installed, or when asked to find plugins/skills/tools. Installs directly; for a rated recommendations report without installing, use automation-advisor.
 ---
 
@@ -51,7 +51,7 @@ Prefer, in order: full coverage of the need, the original author over aggregator
 
 ## 6. Report
 
-Install without asking. Then tell Floyy what was added, one line each (name, why), and ask them to run `/reload-plugins` (Claude cannot run slash commands).
+Install without asking. Then tell the user what was added, one line each (name, why), and ask them to run `/reload-plugins` (Claude cannot run slash commands).
 
 ## 7. Setup on a new machine
 

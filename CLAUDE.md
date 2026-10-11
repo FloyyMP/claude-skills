@@ -1,11 +1,12 @@
 # claude-skills
 
-Public agent skills repo: `FloyyMP/claude-skills`, published via skills.sh. **The only home for every custom skill Floyy creates**, on every machine and VPS. One branch: `main`.
+Public agent skills repo: `FloyyMP/claude-skills`, published via skills.sh. **The only home for every custom skill the owner creates**, on every machine and VPS. One branch: `main`.
 
 ## Layout
 - `skills/<name>/SKILL.md` — one folder per skill (skills.sh / `npx skills` standard), plus optional `references/` and `scripts/`.
 - Scripts ship in pairs where it matters: `.ps1` for Windows, `.sh`/`.py` for Linux. The `.sh`/`.py` is the source of truth; any change to it updates the `.ps1` twin in the same commit. No local pwsh? Test with a portable one: the `linux-x64.tar.gz` from PowerShell's GitHub releases, extracted to `/tmp`.
 - Line endings are LF (`.gitattributes`).
+- Skills are public: no personal names, home-folder paths or emails in them. Say "the user". The `FloyyMP` GitHub handle stays only where it is the install path.
 - Project-specific skills stay in their own project repo (`<project>/.claude/skills/`); everything general-purpose lives here.
 
 ## Versioning
@@ -18,7 +19,7 @@ Each machine has one clone of this repo. `~/.claude/skills/<name>/` holds **inst
 2. Edit the skill here. A new skill starts here too, never directly in `~/.claude/skills/`.
 3. Commit and push to `main` straight away.
 4. Reinstall: `npx skills add FloyyMP/claude-skills --agent claude-code -g -y --skill '*'` (`/sync-skills` runs steps 1, 3 and 4).
-5. When adding a skill, add a row to the README table and the name to the GitHub repo description: `gh repo edit FloyyMP/claude-skills --description "Floyy's Claude Code skills: <comma-separated names>"`.
+5. When adding a skill, add a row to the README table and the name to the GitHub repo description: `gh repo edit FloyyMP/claude-skills --description "Claude Code skills: <comma-separated names>"`.
 6. When removing a skill, also remove its installed copies on every machine: `npx skills remove <name> -g -y` (cleans every agent's copy). Reinstalling doesn't remove them.
 
 ## skills.sh listing

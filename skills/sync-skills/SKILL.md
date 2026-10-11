@@ -1,6 +1,6 @@
 ---
 name: sync-skills
-version: 1.0.1
+version: 1.0.2
 description: Pull, push, and reinstall every skill from FloyyMP/claude-skills. Manual-only — run when the user invokes /sync-skills.
 disable-model-invocation: true
 ---
@@ -12,7 +12,6 @@ Works from any directory. First find this machine's clone of `FloyyMP/claude-ski
 1. The current repo.
 2. Known clone paths, relative to the home directory:
    - `projects/claude-skills` (Ubuntu VPS)
-   - `Documents/Floyy/Projects/Others/claude-skills` (main desktop PC)
    - `Documents/Projects/claude-skills`, `Documents/Projects/Others/claude-skills` (Windows RDP)
 3. Any `claude-skills` folder up to 6 levels under the home directory.
 

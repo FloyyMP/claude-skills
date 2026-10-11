@@ -1,6 +1,6 @@
 ---
 name: complete-session
-version: 2.0.1
+version: 2.0.2
 description: Closes out a Claude Code session so the window can be shut with nothing lost — verifies edited files, lands and pushes every touched repo, updates CLAUDE.md and memory, then proves the state is clean with command output. Use when the user runs /complete-session or says "complete session", "wrap up", "done for today", "close out". Not for wrapping up a single task mid-session.
 license: MIT
 ---
@@ -205,8 +205,8 @@ Evidence line: `candidates: N — saved: N, updated: N, archived: N, rejected: N
 
 **Calibration — these LOOK worth saving but FAIL:**
 - "Fixed the login redirect this session" → narrative; the commit records it.
-- "Floyy wants `pathlib` not `os.path`" → already in global `CLAUDE.md`.
-- "Floyy said skip the README this time" → a one-off answer to a close-out question, not a standing rule. Never save "don't ask again" memories from close-out answers.
+- "User wants `pathlib` not `os.path`" → already in global `CLAUDE.md`.
+- "User said skip the README this time" → a one-off answer to a close-out question, not a standing rule. Never save "don't ask again" memories from close-out answers.
 - "r6-checker source lives in `src/`" → derivable from the repo.
 
 **Format** — auto-save, one fact per file, `name` == filename (without `.md`); update an existing file rather than near-duplicating; absolute dates:
