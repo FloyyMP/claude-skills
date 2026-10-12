@@ -13,4 +13,5 @@ npx skills add FloyyMP/claude-skills --agent claude-code -g -y --skill '*'
 | [complete-session](skills/complete-session) | Closes out a Claude Code session so the window can be shut with nothing lost — verifies edited files, lands and pushes every touched repo, updates CLAUDE.md and memory, then proves the state is clean. |
 | [find-tooling](skills/find-tooling) | Finds the best plugins, skills, MCP servers and CLI tools for the current project or task — searches every cached Claude Code marketplace in one ranked, compact call, then installs the picks. |
 | [isolate-core](skills/isolate-core) | Strips a project to its core source and zips it. Manual-only — invoke explicitly with /isolate-core. |
+| [review-session](skills/review-session) | Reviews everything changed in the current Claude Code session — commits since it started plus uncommitted edits — for repo standards, code smells and bugs. Built for a commit-straight-to-the-branch flow with no PRs. |
 | [sync-skills](skills/sync-skills) | Pulls, pushes and reinstalls every skill from this repo, from any directory. Manual-only — invoke with /sync-skills. |
