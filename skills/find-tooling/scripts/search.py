@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-PLUGINS = Path.home() / ".claude" / "plugins"
+PLUGINS = Path(os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or Path.home() / ".claude") / "plugins"
 INDEX = PLUGINS / "find-tooling-index.json"
 SCHEMA = 1
 SKIP_DIRS = {".git", "node_modules"}
